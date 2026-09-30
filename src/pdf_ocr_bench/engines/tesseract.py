@@ -53,6 +53,8 @@ class TesseractEngine(OcrEngine):
     display_name = "Tesseract"
     handles_timeout = True
     model = "Tesseract 5 LSTM models, one per --lang code (tesseract --list-langs)"
+    modules = ("pytesseract",)
+    extra = "tesseract"
     options = {"psm": PSM}
 
     @classmethod
@@ -61,7 +63,7 @@ class TesseractEngine(OcrEngine):
 
     @classmethod
     def preflight(cls, route: Route) -> Route:
-        return tesseract_preflight(route)
+        return tesseract_preflight(super().preflight(route))
 
     def prepare(self) -> None:
         import pytesseract

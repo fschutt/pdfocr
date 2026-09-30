@@ -18,6 +18,8 @@ class OcrmypdfRapidEngine(OcrmypdfEngine):
     name = "ocrmypdf_rapid"
     display_name = "ocrmypdf+rapid"
     model = "ocrmypdf with the ocrmypdf-rapidocr plugin (RapidOCR PP-OCR models)"
+    modules = ("ocrmypdf", "ocrmypdf_rapidocr", "rapidocr")
+    extra = "ocrmypdf-rapid"
     options = {}
 
     @classmethod
@@ -33,7 +35,8 @@ class OcrmypdfRapidEngine(OcrmypdfEngine):
 
     @classmethod
     def preflight(cls, route: Route) -> Route:
-        return route
+        # the packages only: the plugin replaces Tesseract, so no Tesseract models are needed
+        return super(OcrmypdfEngine, cls).preflight(route)
 
     def prepare(self) -> None:
         import ocrmypdf_rapidocr  # noqa: F401 - fail early if missing

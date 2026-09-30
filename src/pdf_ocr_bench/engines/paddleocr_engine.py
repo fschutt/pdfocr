@@ -24,6 +24,8 @@ class PaddleOcrEngine(OcrEngine):
     name = "paddleocr"
     display_name = "PaddleOCR"
     model = "PaddleOCR 3.x (PaddlePaddle): PP-OCRv6 medium multilingual, or the PP-OCRv5 model of the script"
+    modules = ("paddleocr", "paddle")
+    extra = "paddleocr"
     options = {
         "min_score": Option(0.0, "drop text lines recognized with a lower score", minimum=0.0, maximum=1.0),
         "textline_orientation": Option(True, "detect and turn upside-down (180°) text lines"),

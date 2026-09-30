@@ -31,6 +31,8 @@ class OlmOcrEngine(OcrEngine):
     handles_timeout = True
     reports_confidence = False
     model = f"olmOCR 7B VLM ({DEFAULT_MODEL}) through olmocr.pipeline and vLLM; GPU recommended"
+    modules = ("olmocr",)
+    extra = "olmocr"
     options = {
         "model": Option(DEFAULT_MODEL, "Hugging Face model id or local path"),
         "server": Option("", "URL of a running vLLM-compatible server (empty = spawn one)"),

@@ -113,17 +113,19 @@ saying what to change:
 * an unknown language code, filter or engine, or a malformed page range;
 * a page range outside the document;
 * an engine **named in `--engines`** that cannot read the requested languages (for example
-  `--engines doctr --lang chi_sim`: docTR only has Latin-script models), or whose models are
-  missing on this machine (a Tesseract language pack that is not installed).
+  `--engines doctr --lang chi_sim`: docTR only has Latin-script models), or that cannot run on
+  this machine: its Python package is not installed (the message names the `pip install` extra),
+  a Tesseract language pack is missing, Surya has no `llama-server`, or macOS Vision is not on
+  macOS.
 
-With `--engines all`, engines that cannot read the languages are skipped instead. The log and
-`report.json` say why. It is still an error if no engine at all can read them.
+With `--engines all`, engines that cannot read the languages or cannot run here are skipped
+instead. The log and `report.json` say why. It is still an error if no engine at all can run.
 
 Helper commands:
 
 ```sh
 pdf-ocr-bench check --lang deu+eng --engines all --preprocess grayscale,denoise   # validate + show routing
-pdf-ocr-bench check --lang deu_frak --installed      # ... also against this machine's models
+pdf-ocr-bench check --lang deu_frak --installed      # ... also against this machine (packages, models)
 pdf-ocr-bench languages                               # every --lang code and the model each engine uses
 pdf-ocr-bench filters                                 # the --preprocess filters
 pdf-ocr-bench tesseract-packages --lang deu_frak+eng  # apt packages for the Tesseract models
@@ -144,6 +146,7 @@ Every run starts by logging how each engine was routed:
 [Pipeline]   doctr           multilingual PARSeq (HF hub)
 [Pipeline]   ocrmypdf        deu+eng
 [Pipeline]   ocrmypdf_rapid  -l deu: latin (PP-OCRv5 mobile)
+[Pipeline]   surya           skipped: llama.cpp's llama-server is not installed: brew install llama.cpp, ...
 [Pipeline]   macos_vision    skipped: macOS only (Apple Vision framework)
 ```
 

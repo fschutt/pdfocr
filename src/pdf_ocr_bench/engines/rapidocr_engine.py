@@ -38,6 +38,8 @@ class RapidOcrEngine(OcrEngine):
     name = "rapidocr"
     display_name = "RapidOCR"
     model = "RapidOCR (PP-OCR on ONNX Runtime): PP-OCRv6 small for en/zh/ja, PP-OCRv5 mobile for other scripts"
+    modules = ("rapidocr", "onnxruntime")
+    extra = "rapidocr"
     options = {
         "min_score": Option(0.5, "drop text lines recognized with a lower score", minimum=0.0, maximum=1.0),
         "text_orientation": Option(True, "detect and turn upside-down (180°) text lines"),

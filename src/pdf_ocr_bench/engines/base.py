@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import re
 import threading
 import time
@@ -90,6 +91,9 @@ class OcrEngine(ABC):
     # What the engine runs, for `--help` and `pdf-ocr-bench engines`.
     model: ClassVar[str] = ""
     options: ClassVar[dict[str, Option]] = {}
+    # The Python modules it imports, and the pyproject extra that installs them.
+    modules: ClassVar[tuple[str, ...]] = ()
+    extra: ClassVar[str] = ""
 
     def __init__(self, route: Route, timeout: float | None = None, options: dict[str, Any] | None = None):
         if not route.ok:
@@ -114,7 +118,12 @@ class OcrEngine(ABC):
 
     @classmethod
     def preflight(cls, route: Route) -> Route:
-        """Check `route` against this machine (installed models, platform) before a run."""
+        """Check `route` against this machine before a run; subclasses add models, binaries, platform."""
+        if not route.ok:
+            return route
+        missing = [module for module in cls.modules if importlib.util.find_spec(module) is None]
+        if missing:
+            return unsupported(f"not installed ({', '.join(missing)}): pip install -e '.[{cls.extra}]'")
         return route
 
     def prepare(self) -> None:

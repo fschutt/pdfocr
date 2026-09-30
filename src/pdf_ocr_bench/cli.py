@@ -102,7 +102,7 @@ def run_cmd(input_pdf, output_dir, engines, lang, dpi, pages, preprocess, engine
 @click.option("--preprocess", default="", help=PREPROCESS_HELP)
 @click.option("-O", "--engine-option", "engine_options", multiple=True, metavar="ENGINE.KEY=VALUE", help=OPTION_HELP)
 @click.option("--include-gpu-engines", is_flag=True)
-@click.option("--installed", is_flag=True, help="Also check this machine: installed Tesseract models, platform")
+@click.option("--installed", is_flag=True, help="Also check this machine: engine packages, Tesseract models, llama-server, platform")
 def check(engines, lang, pages, preprocess, engine_options, include_gpu_engines, installed) -> None:
     """Validate the inputs and show how each engine is routed, without running anything."""
     setup_logging(False)

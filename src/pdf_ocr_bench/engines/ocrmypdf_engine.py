@@ -24,6 +24,8 @@ class OcrmypdfEngine(OcrEngine):
     handles_timeout = True
     reports_confidence = False
     model = "ocrmypdf with Tesseract; the PDF text layer is read back with PyMuPDF"
+    modules = ("ocrmypdf",)
+    extra = "ocrmypdf"
     options = {"psm": PSM}
 
     @classmethod
@@ -32,7 +34,7 @@ class OcrmypdfEngine(OcrEngine):
 
     @classmethod
     def preflight(cls, route: Route) -> Route:
-        return tesseract_preflight(route)
+        return tesseract_preflight(super().preflight(route))
 
     def prepare(self) -> None:
         import ocrmypdf  # noqa: F401 - fail early if missing

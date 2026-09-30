@@ -19,6 +19,8 @@ class DoctrEngine(OcrEngine):
     name = "doctr"
     display_name = "docTR"
     model = "docTR (PyTorch): text detector + CRNN (en/fr) or multilingual PARSeq from the HF hub"
+    modules = ("doctr",)
+    extra = "doctr"
     options = {
         "det_arch": Option("fast_base", "text detection model", choices=DET_ARCHS),
         "straight_pages": Option(True, "assume pages are not rotated (faster, axis-aligned boxes)"),

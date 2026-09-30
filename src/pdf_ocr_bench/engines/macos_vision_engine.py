@@ -19,6 +19,8 @@ class MacOSVisionEngine(OcrEngine):
     name = "macos_vision"
     display_name = "macOS Vision"
     model = "Apple Vision VNRecognizeTextRequest (Live Text's recognizer), macOS only"
+    modules = ("Vision",)
+    extra = "macos-vision"
     options = {
         "level": Option("accurate", "recognition level: accurate (neural, slower) or fast", choices=("accurate", "fast")),
         "language_correction": Option(True, "let Vision correct words with its language model"),
@@ -37,7 +39,7 @@ class MacOSVisionEngine(OcrEngine):
     def preflight(cls, route: Route) -> Route:
         if route.ok and sys.platform != "darwin":
             return unsupported("macOS only (Apple Vision framework)")
-        return route
+        return super().preflight(route)
 
     def prepare(self) -> None:
         import Vision  # pyobjc-framework-Vision

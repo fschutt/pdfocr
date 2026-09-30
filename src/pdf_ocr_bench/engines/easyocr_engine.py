@@ -14,6 +14,8 @@ class EasyOcrEngine(OcrEngine):
     name = "easyocr"
     display_name = "EasyOCR"
     model = "EasyOCR (PyTorch): CRAFT text detector + one CRNN recognizer per script group"
+    modules = ("easyocr",)
+    extra = "easyocr"
     options = {
         "decoder": Option("greedy", "CTC decoding: greedy (fast) or beam search", choices=("greedy", "beamsearch", "wordbeamsearch")),
     }

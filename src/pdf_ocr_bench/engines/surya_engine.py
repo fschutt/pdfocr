@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import html
+import os
 import re
+import shutil
 
 from ..languages import Language
 from ..models import BBox, OcrWord, PageImage
-from .base import OcrEngine, Route, split_block
+from .base import OcrEngine, Route, split_block, unsupported
 
 _LINE_BREAK = re.compile(r"<br\s*/?>|</(?:p|div|li|tr|h[1-6])>", re.I)
 _TAG = re.compile(r"<[^>]+>")
@@ -21,10 +23,31 @@ class SuryaEngine(OcrEngine):
     name = "surya"
     display_name = "Surya"
     model = "Surya 2 VLM (datalab-to/surya-ocr-2), served by llama.cpp (CPU) or vLLM (GPU)"
+    modules = ("surya",)
+    extra = "surya"
 
     @classmethod
     def route(cls, languages: list[Language]) -> Route:
         return Route(detail="automatic (VLM)")
+
+    @classmethod
+    def preflight(cls, route: Route) -> Route:
+        """Without a GPU, Surya spawns llama.cpp's llama-server, unless SURYA_INFERENCE_URL names a running server."""
+        route = super().preflight(route)
+        if not route.ok:
+            return route
+        from surya.inference import SuryaInferenceManager
+        from surya.settings import settings
+
+        if settings.SURYA_INFERENCE_URL or SuryaInferenceManager().method.lower() != "llamacpp":
+            return route
+        binary = settings.LLAMA_CPP_BINARY or "llama-server"
+        if os.path.isfile(binary) or shutil.which(binary):
+            return route
+        return unsupported(
+            f"llama.cpp's {binary} is not installed: brew install llama.cpp, or put a release from "
+            "https://github.com/ggml-org/llama.cpp/releases on PATH (or set LLAMA_CPP_BINARY / SURYA_INFERENCE_URL)"
+        )
 
     def prepare(self) -> None:
         from surya.inference import SuryaInferenceManager

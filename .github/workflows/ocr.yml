@@ -157,7 +157,7 @@ jobs:
             echo "LD_LIBRARY_PATH=$bin_dir:${LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
             "$bin_dir/llama-server" --version || true
           else
-            echo "::warning::Could not download llama.cpp; Surya will be skipped"
+            echo "::warning::Could not download llama.cpp: Surya cannot run (skipped with engines=all, an error when named)"
           fi
 
       - name: Install Python deps
