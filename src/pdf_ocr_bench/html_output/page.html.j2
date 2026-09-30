@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="{{ html_lang }}">
+<head>
+<meta charset="utf-8">
+<meta name="generator" content="pdf-ocr-bench">
+<meta name="ocr.engine" content="{{ engine_name }}">
+<meta name="pdf.options.pageWidth" content="{{ '%.4f' % width_mm }}">
+<meta name="pdf.options.pageHeight" content="{{ '%.4f' % height_mm }}">
+<title>Page {{ page_num + 1 }}</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  .page {
+    position: relative;
+    width: {{ '%.2f' % width_pt }}pt;
+    height: {{ '%.2f' % height_pt }}pt;
+    overflow: hidden;
+  }
+  .page img {
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%;
+    height: 100%;
+  }
+  .word {
+    position: absolute;
+    color: transparent;      /* invisible by default */
+    font-family: sans-serif;
+    line-height: 1;
+    white-space: pre;
+  }
+</style>
+</head>
+<body>
+<div class="page" id="page-{{ page_num }}">
+  <img src="{{ image_name }}" alt="Page {{ page_num + 1 }}">
+  {% for word in words %}
+  {% set st = style(word) %}
+  <span class="word" style="left: {{ '%.4f' % (word.bbox.x * 100) }}%; top: {{ '%.4f' % (st.top * 100) }}%; width: {{ '%.4f' % (word.bbox.w * 100) }}%; height: {{ '%.4f' % (word.bbox.h * 100) }}%; font-size: {{ '%.2f' % st.font_size_pt }}pt;" data-confidence="{{ '%.3f' % word.confidence }}">{{ word.text | e }}{{ st.suffix }}</span>
+  {% endfor %}
+</div>
+<script>
+  // Browser-only styles, injected at runtime so HTML-to-PDF converters never see them
+  // (azul-css <= 0.0.16 applies an unknown pseudo-element rule to its base selector,
+  // which would turn `.word::selection { color: #000 }` into visible black text).
+  document.head.insertAdjacentHTML('beforeend', `<style>
+    .word::selection { color: #000; background: rgba(0, 120, 215, 0.3); }
+    .page.debug .word { color: rgba(255, 0, 0, 0.5); outline: 1px solid rgba(255, 0, 0, 0.2); }
+  </style>`);
+  // Toggle debug mode: press 'd' to make all OCR text visible
+  document.addEventListener('keydown', e => {
+    if (e.key === 'd') document.querySelector('.page').classList.toggle('debug');
+  });
+</script>
+</body>
+</html>

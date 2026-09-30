@@ -1,0 +1,62 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pdf-ocr-bench"
+version = "0.1.0"
+description = "Run multiple OCR engines on scanned PDFs, emit positioned-HTML zips per engine, rank engines by consensus"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "pymupdf",
+    "pymupdf-fonts",
+    "pypdfium2",
+    "Pillow",
+    "pydantic>=2",
+    "click",
+    "rich",
+    "tabulate",
+    "rapidfuzz",
+    "jiwer",
+    "jinja2",
+    "numpy",
+]
+
+[project.optional-dependencies]
+tesseract = ["pytesseract"]
+rapidocr = ["rapidocr", "onnxruntime"]
+paddleocr = ["paddlepaddle", "paddleocr"]
+easyocr = ["easyocr"]
+doctr = ["python-doctr[torch]"]
+surya = ["surya-ocr"]
+ocrmypdf = ["ocrmypdf"]
+ocrmypdf-rapid = ["ocrmypdf", "ocrmypdf-rapidocr"]
+olmocr = ["olmocr"]
+# CI = everything except olmOCR (needs GPU / huge model)
+ci = [
+    "pdf-ocr-bench[tesseract]",
+    "pdf-ocr-bench[rapidocr]",
+    "pdf-ocr-bench[paddleocr]",
+    "pdf-ocr-bench[easyocr]",
+    "pdf-ocr-bench[doctr]",
+    "pdf-ocr-bench[surya]",
+    "pdf-ocr-bench[ocrmypdf]",
+    "pdf-ocr-bench[ocrmypdf-rapid]",
+]
+all = ["pdf-ocr-bench[ci]", "pdf-ocr-bench[olmocr]"]
+test = ["pytest", "pytesseract"]
+
+[project.scripts]
+pdf-ocr-bench = "pdf_ocr_bench.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"pdf_ocr_bench.html_output" = ["*.j2"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["slow: runs real OCR engines"]

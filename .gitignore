@@ -1,0 +1,12 @@
+__pycache__/
+*.egg-info/
+.venv/
+.pytest_cache/
+results/
+*.pdf
+!sample.pdf
+
+html2pdf/target/
+# local-only [patch.crates-io] pointing at a printpdf checkout (see html2pdf/README.md)
+html2pdf/.cargo/
+html2pdf/Cargo.lock

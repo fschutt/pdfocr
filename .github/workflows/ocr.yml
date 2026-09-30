@@ -1,0 +1,238 @@
+name: OCR PDF Processing
+
+on:
+  workflow_dispatch:
+    inputs:
+      pdf_url:
+        description: 'Public URL to input PDF'
+        required: true
+        type: string
+      lang:
+        description: 'Document language (ISO 639-3 for Tesseract, mapped for others). Examples: eng, deu, fra, deu_frak (German Fraktur), frk (generic Fraktur), chi_sim, jpn, ara, rus, lat'
+        required: false
+        default: 'eng'
+        type: string
+      engines:
+        description: 'Engines to run (comma-separated, or "all"). Available: tesseract, rapidocr, paddleocr, easyocr, doctr, surya, ocrmypdf, ocrmypdf_rapid'
+        required: false
+        default: 'all'
+        type: string
+      dpi:
+        description: 'Render DPI for page images (150=fast/draft, 300=default, 600=high quality)'
+        required: false
+        default: '300'
+        type: string
+      page_range:
+        description: 'Pages to process, e.g. "1-5" or "1,3,7-10" (empty = all pages)'
+        required: false
+        default: ''
+        type: string
+      timeout_per_page:
+        description: 'Max seconds per page per engine before skipping (0 = no limit)'
+        required: false
+        default: '300'
+        type: string
+
+# Inputs reach the shell only through env vars (never ${{ }} inside `run:`), so a crafted
+# input cannot inject commands.
+env:
+  PDF_URL: ${{ inputs.pdf_url }}
+  OCR_LANG: ${{ inputs.lang }}
+  OCR_ENGINES: ${{ inputs.engines }}
+  OCR_DPI: ${{ inputs.dpi }}
+  OCR_PAGES: ${{ inputs.page_range }}
+  OCR_TIMEOUT: ${{ inputs.timeout_per_page }}
+  PYTHONUNBUFFERED: '1'
+  PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK: 'True'
+
+jobs:
+  ocr:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Validate inputs
+        run: |
+          [[ "$OCR_LANG" =~ ^[A-Za-z_+]+$ ]] || { echo "::error::invalid lang '$OCR_LANG'"; exit 1; }
+          [[ "$OCR_ENGINES" =~ ^[a-z_,\ -]+$ ]] || { echo "::error::invalid engines '$OCR_ENGINES'"; exit 1; }
+          [[ "$OCR_DPI" =~ ^[0-9]+$ ]] || { echo "::error::invalid dpi '$OCR_DPI'"; exit 1; }
+          [[ -z "$OCR_PAGES" || "$OCR_PAGES" =~ ^[0-9,\ -]+$ ]] || { echo "::error::invalid page_range '$OCR_PAGES'"; exit 1; }
+          [[ "$OCR_TIMEOUT" =~ ^[0-9]+$ ]] || { echo "::error::invalid timeout '$OCR_TIMEOUT'"; exit 1; }
+
+      - name: Install system deps + Tesseract language packs
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            tesseract-ocr tesseract-ocr-eng ghostscript poppler-utils libgl1 \
+            libglib2.0-0 libsm6 libxext6 libxrender1 \
+            qpdf unpaper pngquant
+
+          # Handles compound langs like "eng+deu". Package names use '-' where Tesseract
+          # codes use '_' (chi_sim -> tesseract-ocr-chi-sim). Current tessdata has no
+          # deu_frak model: fall back to frk (German Fraktur) + the Fraktur script model;
+          # the Tesseract engine picks whichever is installed.
+          for lang_code in $(echo "$OCR_LANG" | tr '+' '\n'); do
+            pkg="tesseract-ocr-${lang_code//_/-}"
+            echo "Installing $pkg ..."
+            if sudo apt-get install -y --no-install-recommends "$pkg"; then continue; fi
+            case "$lang_code" in
+              deu_frak|frk) sudo apt-get install -y --no-install-recommends tesseract-ocr-frk tesseract-ocr-script-frak tesseract-ocr-deu || true ;;
+            esac
+            echo "::warning::Could not install $pkg — Tesseract may fall back to another model for '$lang_code'"
+          done
+          echo "Installed Tesseract languages:"
+          tesseract --list-langs
+
+      - name: Install llama.cpp (CPU backend for Surya 2)
+        if: contains(inputs.engines, 'surya') || inputs.engines == 'all'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$HOME/llama.cpp"
+          if gh release download --repo ggml-org/llama.cpp --pattern '*bin-ubuntu-x64.zip' --dir /tmp/llama; then
+            unzip -q /tmp/llama/*.zip -d "$HOME/llama.cpp"
+            bin_dir=$(dirname "$(find "$HOME/llama.cpp" -name llama-server -type f | head -1)")
+            echo "$bin_dir" >> "$GITHUB_PATH"
+            echo "LD_LIBRARY_PATH=$bin_dir:${LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+            "$bin_dir/llama-server" --version || true
+          else
+            echo "::warning::Could not download llama.cpp — Surya will be skipped"
+          fi
+
+      - name: Install Python deps
+        # [ci] = all engines minus olmocr
+        run: |
+          pip install --upgrade pip
+          pip install -e ".[ci]"
+
+      - name: Pre-download models
+        run: |
+          echo "::group::Model downloads (lang=$OCR_LANG)"
+          # surya's GGUF is fetched on first use by its own server; skip the spawn here
+          pdf-ocr-bench warmup --lang "$OCR_LANG" --engines tesseract,rapidocr,paddleocr,easyocr,doctr,ocrmypdf_rapid
+          echo "::endgroup::"
+
+      - name: Download input PDF
+        run: |
+          curl -fSL --max-filesize 500000000 -o input.pdf "$PDF_URL"
+          echo "File size: $(du -h input.pdf | cut -f1)"
+          echo "Pages: $(python -c "import pymupdf; print(len(pymupdf.open('input.pdf')))")"
+
+      - name: Run OCR pipeline
+        run: |
+          args=(input.pdf -o results --engines "$OCR_ENGINES" --lang "$OCR_LANG" --dpi "$OCR_DPI"
+                --timeout-per-page "$OCR_TIMEOUT" --report results/report.json -v)
+          [ -n "$OCR_PAGES" ] && args+=(--pages "$OCR_PAGES")
+          echo "Running: pdf-ocr-bench run ${args[*]}"
+          set -o pipefail
+          pdf-ocr-bench run "${args[@]}" 2>&1 | tee ocr.log
+
+      - name: Upload engine results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: all-results
+          path: results/
+          retention-days: 30
+
+      - name: List engine zips
+        if: always()
+        run: |
+          for dir in results/*/; do
+            engine=$(basename "$dir")
+            [ -f "$dir/pages.zip" ] && echo "Found results for engine: $engine ($(du -h "$dir/pages.zip" | cut -f1))"
+          done
+          true
+
+      # One artifact per engine, for easy download
+      - name: Upload tesseract
+        uses: actions/upload-artifact@v4
+        if: always() && hashFiles('results/tesseract/pages.zip') != ''
+        with:
+          name: ocr-tesseract
+          path: results/tesseract/pages.zip
+
+      - name: Upload rapidocr
+        uses: actions/upload-artifact@v4
+        if: always() && hashFiles('results/rapidocr/pages.zip') != ''
+        with:
+          name: ocr-rapidocr
+          path: results/rapidocr/pages.zip
+
+      - name: Upload paddleocr
+        uses: actions/upload-artifact@v4
+        if: always() && hashFiles('results/paddleocr/pages.zip') != ''
+        with:
+          name: ocr-paddleocr
+          path: results/paddleocr/pages.zip
+
+      - name: Upload easyocr
+        uses: actions/upload-artifact@v4
+        if: always() && hashFiles('results/easyocr/pages.zip') != ''
+        with:
+          name: ocr-easyocr
+          path: results/easyocr/pages.zip
+
+      - name: Upload doctr
+        uses: actions/upload-artifact@v4
+        if: always() && hashFiles('results/doctr/pages.zip') != ''
+        with:
+          name: ocr-doctr
+          path: results/doctr/pages.zip
+
+      - name: Upload surya
+        uses: actions/upload-artifact@v4
+        if: always() && hashFiles('results/surya/pages.zip') != ''
+        with:
+          name: ocr-surya
+          path: results/surya/pages.zip
+
+      - name: Upload ocrmypdf
+        uses: actions/upload-artifact@v4
+        if: always() && hashFiles('results/ocrmypdf/pages.zip') != ''
+        with:
+          name: ocr-ocrmypdf
+          path: results/ocrmypdf/pages.zip
+
+      - name: Upload ocrmypdf-rapid
+        uses: actions/upload-artifact@v4
+        if: always() && hashFiles('results/ocrmypdf_rapid/pages.zip') != ''
+        with:
+          name: ocr-ocrmypdf-rapid
+          path: results/ocrmypdf_rapid/pages.zip
+
+      - name: Upload report & logs
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ocr-report
+          path: |
+            results/report.json
+            ocr.log
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## OCR Results" >> "$GITHUB_STEP_SUMMARY"
+          [ -f results/report.json ] || exit 0
+          python3 - >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          import json
+          r = json.load(open('results/report.json'))
+          fmt = lambda v, spec: '-' if v is None else format(v, spec)
+          print('| Engine | Words | Avg Conf | Time (s) | Status |')
+          print('|--------|-------|----------|----------|--------|')
+          for e in r.get('engines', []):
+              status = '✅' if e.get('success') else f"❌ {(e.get('error') or '')[:80]}"
+              print(f"| {e['display_name']} | {e.get('total_words', '-')} | {fmt(e.get('avg_confidence'), '.3f')} | {fmt(e.get('elapsed'), '.1f')} | {status} |")
+          print()
+          if r.get('ranking'):
+              print('### Ranking (by consensus agreement)')
+              for i, eng in enumerate(r['ranking'], 1):
+                  print(f"{i}. **{eng['name']}** — avg CER {eng['avg_cer']:.4f}, bbox IoU {eng['avg_bbox_iou']:.3f}")
+          EOF

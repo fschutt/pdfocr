@@ -1,0 +1,37 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-eng
+      - run: pip install -e ".[test]"
+      - run: pytest -v
+
+  html2pdf:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: html2pdf
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: html2pdf
+      - run: cargo test --release
+      - name: Convert a generated zip
+        run: |
+          pip install -e ..
+          python ../tests/make_zip.py /tmp/pages.zip
+          cargo run --release -- /tmp/pages.zip -o /tmp/out.pdf
+          python -c "import pymupdf; d = pymupdf.open('/tmp/out.pdf'); assert len(d) == 2, len(d); print(d[0].get_text())"
