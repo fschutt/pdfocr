@@ -102,7 +102,9 @@ jobs:
         run: |
           engines=$(echo "$OCR_ENGINES" | tr 'A-Z-' 'a-z_' | tr -d ' ')
           if [ "$engines" = "all" ]; then
-            linux=all; macos=true
+            # like every engine under "all": skipped when it cannot read --lang
+            linux=all
+            macos=$(pdf-ocr-bench check --lang "$OCR_LANG" --engines macos_vision >/dev/null 2>&1 && echo true || echo false)
           else
             linux=$(echo "$engines" | tr ',' '\n' | grep -vx 'macos_vision' | paste -sd, - || true)
             macos=$(echo ",$engines," | grep -q ',macos_vision,' && echo true || echo false)
