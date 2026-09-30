@@ -362,7 +362,7 @@ def test_preprocessing_runs_before_the_engines(monkeypatch, tmp_path, pdf):
     report, out = _run(monkeypatch, tmp_path, pdf, [FakeEngine], preprocess="grayscale,binarize")
     assert report.preprocess == ["grayscale", "binarize"]
     with Image.open(out / "images" / "page_001.png") as img:
-        assert img.mode == "L" and set(img.getdata()) <= {0, 255}
+        assert img.mode == "L" and {value for _, value in img.getcolors()} <= {0, 255}
 
 
 # --- real engine (only if Tesseract is installed) --------------------------------

@@ -18,6 +18,7 @@ input.pdf
   ├─► Surya             ─► results/surya/pages.zip
   ├─► ocrmypdf          ─► results/ocrmypdf/pages.zip
   ├─► ocrmypdf+rapid    ─► results/ocrmypdf_rapid/pages.zip
+  ├─► macOS Vision      ─► results/macos_vision/pages.zip   (macOS only)
   ├─► olmOCR            ─► results/olmocr/pages.zip     (opt-in: --include-gpu-engines)
   │
   ▼
@@ -57,6 +58,19 @@ because `LANG` is the locale. `make setup` runs `scripts/install_system_deps.sh`
 Homebrew's Python 3.12, Tesseract with all language models, ocrmypdf's tools, llama.cpp (Surya)
 and Rust; on Debian/Ubuntu, the apt packages for the requested languages, plus a hint for Rust
 >= 1.88 (rustup) and llama.cpp. On a Mac, `macos_vision` runs as part of `ENGINES=all`.
+
+`EXTRAS=` picks the engines the venv gets (default `ci,test`: every CPU engine, several GB of
+PyTorch and PaddlePaddle). To try only macOS Vision, with Tesseract to compare against:
+
+```sh
+make setup EXTRAS=macos-vision,tesseract,test OCR_LANG=deu+eng
+make test
+make ocr PDF=scan.pdf OCR_LANG=deu+eng ENGINES=macos_vision,tesseract OPTIONS="macos_vision.level=accurate"
+make pdfs
+```
+
+Every engine's model and `-O` parameters are listed by `.venv/bin/pdf-ocr-bench engines` and at
+the end of `.venv/bin/pdf-ocr-bench run --help`; see [Engine parameters](#engine-parameters).
 
 ## Install
 

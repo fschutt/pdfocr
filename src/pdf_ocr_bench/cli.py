@@ -47,7 +47,14 @@ RUN_EPILOG = (
 @click.group()
 @click.version_option(package_name="pdf-ocr-bench")
 def main() -> None:
-    """Run several OCR engines on a scanned PDF and emit positioned-HTML zips per engine."""
+    """Run several OCR engines on a scanned PDF and emit positioned-HTML zips per engine.
+
+    \b
+    pdf-ocr-bench engines      every engine's model and -O parameters
+    pdf-ocr-bench languages    the --lang codes and the model each engine uses for them
+    pdf-ocr-bench check ...    validate the inputs and show the routing, without running
+    pdf-ocr-bench run --help   all run options
+    """
 
 
 @main.command("run", epilog=RUN_EPILOG)

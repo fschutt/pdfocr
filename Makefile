@@ -1,6 +1,7 @@
 # Run everything locally, one step after another:
 #
 #   make setup OCR_LANG=deu+eng     system packages (Homebrew / apt), .venv with every engine, html2pdf
+#              [EXTRAS=macos-vision,tesseract,test]   only these engines (pyproject.toml extras)
 #   make test                       unit tests (on a Mac also the macOS Vision tests), html2pdf tests
 #   make check  PDF=... OCR_LANG=... validate the inputs against this machine, show the routing
 #   make ocr    PDF=scan.pdf OCR_LANG=deu+eng [ENGINES=all] [PREPROCESS=grayscale,deskew,denoise]
@@ -10,10 +11,12 @@
 #
 # OCR_LANG, not LANG: LANG is the locale variable.
 
-PYTHON ?= $(shell for p in python3.13 python3.12 python3.11; do command -v $$p >/dev/null && { echo $$p; break; }; done)
+PYTHON ?= $(shell for p in python3.12 python3.11 python3.13; do command -v $$p >/dev/null && { echo $$p; break; }; done)
 VENV := .venv
 BIN := $(VENV)/bin
-EXTRAS ?= ci,test
+# the engines in the venv; defaults to what the last setup installed
+DEFAULT_EXTRAS := ci,test
+EXTRAS ?= $(or $(shell cat $(VENV)/extras 2>/dev/null),$(DEFAULT_EXTRAS))
 
 PDF ?= sample.pdf
 OCR_LANG ?= eng
@@ -27,7 +30,7 @@ OUT ?= results
 RUN_ARGS = --lang "$(OCR_LANG)" --engines "$(ENGINES)" --preprocess "$(PREPROCESS)" \
 	$(foreach o,$(OPTIONS),-O "$(o)") $(if $(PAGES),--pages "$(PAGES)")
 
-.PHONY: setup system-deps venv html2pdf test check ocr pdfs all clean
+.PHONY: setup system-deps venv html2pdf test check ocr pdfs all clean FORCE
 
 setup: system-deps venv html2pdf
 
@@ -36,7 +39,12 @@ system-deps:
 
 venv: $(BIN)/pdf-ocr-bench
 
-$(BIN)/pdf-ocr-bench: pyproject.toml
+# rewritten only when EXTRAS changes, which reinstalls
+$(VENV)/extras: FORCE
+	@mkdir -p $(VENV)
+	@test "$$(cat $@ 2>/dev/null)" = "$(EXTRAS)" || echo "$(EXTRAS)" > $@
+
+$(BIN)/pdf-ocr-bench: pyproject.toml $(VENV)/extras
 	@test -n "$(PYTHON)" || { echo "Python >= 3.11 not found (make system-deps installs it)"; exit 1; }
 	$(PYTHON) -m venv $(VENV)
 	$(BIN)/pip install --upgrade pip
@@ -57,9 +65,11 @@ ocr: venv
 	$(BIN)/pdf-ocr-bench run "$(PDF)" -o "$(OUT)" --dpi $(DPI) $(RUN_ARGS) -v
 
 pdfs: html2pdf
+	@test -n "$$(ls $(OUT)/*/pages.zip 2>/dev/null)" || { echo "no $(OUT)/*/pages.zip: run make ocr first"; exit 1; }
 	@for zip in $(OUT)/*/pages.zip; do \
 		engine=$$(basename "$$(dirname "$$zip")"); \
-		html2pdf/target/release/html2pdf "$$zip" -o "$(OUT)/$$engine.pdf" || exit 1; \
+		cargo run -q --release --locked --manifest-path html2pdf/Cargo.toml -- "$$zip" -o "$(OUT)/$$engine.pdf" || exit 1; \
+		echo "$(OUT)/$$engine.pdf"; \
 	done
 
 all: setup test ocr pdfs
