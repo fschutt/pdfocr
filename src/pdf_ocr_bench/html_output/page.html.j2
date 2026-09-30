@@ -27,6 +27,16 @@
     font-family: sans-serif;
     line-height: 1;
     white-space: pre;
+    /* when selected, text becomes visible via ::selection */
+  }
+  .word::selection {
+    color: #000;
+    background: rgba(0, 120, 215, 0.3);
+  }
+  /* debug mode: make all text visible */
+  .page.debug .word {
+    color: rgba(255, 0, 0, 0.5);
+    border: 1px solid rgba(255, 0, 0, 0.2);
   }
 </style>
 </head>
@@ -39,13 +49,6 @@
   {% endfor %}
 </div>
 <script>
-  // Browser-only styles, injected at runtime so HTML-to-PDF converters never see them
-  // (azul-css <= 0.0.16 applies an unknown pseudo-element rule to its base selector,
-  // which would turn `.word::selection { color: #000 }` into visible black text).
-  document.head.insertAdjacentHTML('beforeend', `<style>
-    .word::selection { color: #000; background: rgba(0, 120, 215, 0.3); }
-    .page.debug .word { color: rgba(255, 0, 0, 0.5); outline: 1px solid rgba(255, 0, 0, 0.2); }
-  </style>`);
   // Toggle debug mode: press 'd' to make all OCR text visible
   document.addEventListener('keydown', e => {
     if (e.key === 'd') document.querySelector('.page').classList.toggle('debug');

@@ -119,8 +119,10 @@ one size. It is then capped so the word fits its box width (otherwise PDF extrac
 neighbouring words). Words are centered vertically on their line, and every word except the last
 on a line ends with a space, so copy-paste keeps word boundaries.
 
-`metadata.json` holds the engine name, page count, total words, elapsed time and average
-confidence, plus the same per page. It is `null` for engines that report no confidence.
+`metadata.json` is the zip's manifest. It holds the engine name, page count, total words, elapsed
+time and average confidence (`null` for engines that report no confidence). Per page, it holds the
+HTML and image file names, the page size in px and pt, words, confidence, time, and any
+skip/error. `html2pdf` reads page order and sizes from it.
 
 ## Engines
 
@@ -167,6 +169,13 @@ plus `all-results` and `ocr-report`. It also writes a summary table to the run p
 `pdf_url`, `lang`, `engines`, `dpi`, `page_range`, `timeout_per_page`. olmOCR is excluded.
 
 `.github/workflows/tests.yml` runs `pytest` and the `html2pdf` tests on every push.
+
+## Upstream patches
+
+The text layer is only invisible with two upstream fixes: printpdf must honour the alpha of
+`color: transparent`, and azul-css must drop invalid CSS rules instead of widening their
+selectors. The `git am`-ready patches, what they fix, and the release order are in
+[`patches/`](patches/).
 
 ## Tests
 

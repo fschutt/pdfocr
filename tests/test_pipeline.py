@@ -156,9 +156,8 @@ def test_page_html():
     assert "a&lt;b&amp;c </span>" in html  # escaped, with the inter-word space
     assert ">ß</span>" in html  # last word of the line: no trailing space
     assert "left: 10.0000%" in html
-    # printpdf/azul must not see pseudo-element rules in the static stylesheet
     style = html[html.index("<style>") : html.index("</style>")]
-    assert "::selection" not in style and "color: transparent" in style
+    assert "color: transparent" in style and ".word::selection" in style and ".page.debug .word" in style
 
 
 def test_word_styles_share_line_size_and_fit_width():

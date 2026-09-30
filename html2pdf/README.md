@@ -1,8 +1,8 @@
 # html2pdf
 
 Converts a `pages.zip` produced by `pdf-ocr-bench run` into a searchable PDF using
-[printpdf](https://github.com/fschutt/printpdf)'s HTML renderer: each `page_NNN.html` becomes one
-page with the scan as background image and the OCR words as invisible, selectable text on top.
+[printpdf](https://github.com/fschutt/printpdf)'s HTML renderer. Each `page_NNN.html` becomes one
+page, with the scan as background image and the OCR words as invisible, selectable text on top.
 
 ```sh
 cargo run --release -- results/tesseract/pages.zip -o final.pdf
@@ -12,34 +12,26 @@ cargo run --release -- results/tesseract/pages.zip -o final.pdf
 |---|---|
 | `-o, --output PATH` | output PDF (default: `<input>.pdf`) |
 | `--font NAME=PATH` | register a TTF/OTF under `NAME` (repeatable), e.g. a CJK font |
-| `--visible-text` | draw the OCR text in red instead of invisible, to check alignment |
 | `--title TEXT` | document title |
 | `-v, --verbose` | print printpdf warnings |
 
 ## How it works
 
-1. Reads every `page_NNN.html` from the zip in page order, plus the images and `metadata.json`.
-2. Page size comes from `<meta name="pdf.options.pageWidth/pageHeight">` (mm), falling back to
-   `metadata.json`, then the `.page { width/height: …pt }` rule, then A4.
-3. Each page is rendered with `PdfDocument::from_html_with_cache` (zero margins, one shared font
-   pool), handing over only the images that page references.
-4. Single-page documents are merged with `PdfDocument::append_document` and saved once.
+1. Read `metadata.json`, the zip's manifest. It lists every page with its HTML file, image and size
+   in pt. A zip without it is rejected.
+2. Render each page with `PdfDocument::from_html_with_cache`, using zero margins, the page size from
+   the manifest, the page's image, and one font pool shared by all pages. A page whose content
+   overflows onto a second PDF page is an error.
+3. Merge the single-page documents with `PdfDocument::append_document` and save once.
+
+To check alignment, open a page in a browser and press `d`. That adds the `debug` class, and the
+`.page.debug .word` rule shows the text in red. printpdf renders the same rule if the HTML carries
+`class="page debug"`.
 
 ## printpdf requirement
 
-Invisible OCR text relies on printpdf honouring `color: transparent`. printpdf ≤ 0.12.8 drops the
-alpha channel of text colors, so the text layer renders as **opaque black** over the scan. The fix
-(text render mode 3 for alpha 0, an ExtGState for partial alpha) is on printpdf branch
-`claude/nice-bardeen-hjit6y`. Until it is released, build against a local checkout:
+The text is only invisible with two upstream fixes, both in [`../patches`](../patches/):
+- printpdf must honour the alpha of `color: transparent`;
+- azul-css must drop invalid rules such as `.word::selection` instead of applying them to `.word`.
 
-```toml
-# html2pdf/.cargo/config.toml (git-ignored)
-[patch.crates-io]
-printpdf = { path = "../../printpdf" }
-```
-
-## Known azul-css limitation
-
-azul-css ≤ 0.0.16 applies a rule with an unknown pseudo-element to its base selector, so
-`.word::selection { color: #000 }` would make every word black. The page template therefore injects
-its browser-only styles (`::selection`, debug mode) from `<script>`, which printpdf ignores.
+With the released printpdf 0.12.8, the text layer renders as black text over the scan.

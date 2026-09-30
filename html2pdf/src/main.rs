@@ -9,11 +9,11 @@ use clap::Parser;
 use printpdf::html::{build_font_pool, SharedFontPool};
 use printpdf::{Base64OrRaw, GeneratePdfOptions, PdfDocument, PdfSaveOptions, PdfWarnMsg};
 use serde::Deserialize;
+use zip::ZipArchive;
 
 const MM_PER_PT: f32 = 25.4 / 72.0;
-const A4_MM: (f32, f32) = (210.0, 297.0);
 
-/// Convert a pdf-ocr-bench `pages.zip` (page_NNN.html + page_NNN.png) into one PDF.
+/// Convert a pdf-ocr-bench `pages.zip` (page_NNN.html + page_NNN.png + metadata.json) into one PDF.
 #[derive(Parser, Debug)]
 #[command(version, about)]
 struct Args {
@@ -28,10 +28,6 @@ struct Args {
     #[arg(long = "font", value_name = "NAME=PATH")]
     fonts: Vec<String>,
 
-    /// Render the OCR text visibly (red) instead of transparent, for checking alignment
-    #[arg(long)]
-    visible_text: bool,
-
     /// Document title
     #[arg(long, default_value = "OCR Document")]
     title: String,
@@ -41,24 +37,26 @@ struct Args {
     verbose: bool,
 }
 
-#[derive(Deserialize, Default)]
+/// The zip's manifest, written by pdf_ocr_bench.html_output.zipper.
+#[derive(Deserialize)]
 struct Metadata {
-    engine: Option<String>,
-    #[serde(default)]
+    engine: String,
     pages: Vec<PageMeta>,
 }
 
 #[derive(Deserialize)]
 struct PageMeta {
+    page_num: u32,
     html: String,
+    image: String,
     width_pt: f32,
     height_pt: f32,
 }
 
-struct Bundle {
-    pages: Vec<(String, String)>,
-    assets: BTreeMap<String, Vec<u8>>,
-    metadata: Metadata,
+impl PageMeta {
+    fn size_mm(&self) -> (f32, f32) {
+        (self.width_pt * MM_PER_PT, self.height_pt * MM_PER_PT)
+    }
 }
 
 fn main() -> Result<()> {
@@ -66,41 +64,38 @@ fn main() -> Result<()> {
     let output = args.output.clone().unwrap_or_else(|| args.input.with_extension("pdf"));
     let start = Instant::now();
 
-    let bundle = read_bundle(&args.input)?;
-    if bundle.pages.is_empty() {
-        bail!("{}: no page_NNN.html entries found", args.input.display());
+    let mut zip = open_zip(&args.input)?;
+    let metadata: Metadata = serde_json::from_slice(&read_entry(&mut zip, "metadata.json")?)
+        .context("parsing metadata.json")?;
+    if metadata.pages.is_empty() {
+        bail!("{}: metadata.json lists no pages", args.input.display());
     }
     println!(
         "[html2pdf] {}: {} pages (engine: {})",
         args.input.display(),
-        bundle.pages.len(),
-        bundle.metadata.engine.as_deref().unwrap_or("unknown"),
+        metadata.pages.len(),
+        metadata.engine
     );
 
     let fonts = load_fonts(&args.fonts)?;
     let pool = build_font_pool(&raw_fonts(&fonts), None);
 
+    let mut pages = metadata.pages;
+    pages.sort_by_key(|p| p.page_num);
+
     let mut doc = PdfDocument::new(&args.title);
     let mut warnings = Vec::new();
-    for (i, (name, html)) in bundle.pages.iter().enumerate() {
+    for (i, page) in pages.iter().enumerate() {
         let page_start = Instant::now();
-        let html = if args.visible_text { make_text_visible(html) } else { html.clone() };
-        let size = page_size_mm(&html, &bundle.metadata, name);
-        let page = render_page(&html, &bundle.assets, &fonts, &pool, size, &mut warnings)
-            .with_context(|| format!("rendering {name}"))?;
-        if page.pages.is_empty() {
-            bail!("{name}: printpdf produced no page ({} warnings)", warnings.len());
-        }
-        if page.pages.len() > 1 {
-            eprintln!("[html2pdf] warning: {name} overflowed into {} pages", page.pages.len());
-        }
-        doc.append_document(page);
+        let rendered = render_page(&mut zip, page, &fonts, &pool, &mut warnings)
+            .with_context(|| format!("rendering {}", page.html))?;
+        doc.append_document(rendered);
+        let (w, h) = page.size_mm();
         println!(
-            "[html2pdf] Page {}/{}: {name} {:.1}x{:.1}mm, {:.2}s",
+            "[html2pdf] Page {}/{}: {} {w:.1}x{h:.1}mm, {:.2}s",
             i + 1,
-            bundle.pages.len(),
-            size.0,
-            size.1,
+            pages.len(),
+            page.html,
             page_start.elapsed().as_secs_f32()
         );
     }
@@ -118,56 +113,29 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn read_bundle(path: &Path) -> Result<Bundle> {
+fn open_zip(path: &Path) -> Result<ZipArchive<File>> {
     let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
-    let mut zip = zip::ZipArchive::new(file).context("reading zip")?;
-    let mut pages = Vec::new();
-    let mut assets = BTreeMap::new();
-    let mut metadata = Metadata::default();
-
-    for i in 0..zip.len() {
-        let mut entry = zip.by_index(i)?;
-        if entry.is_dir() {
-            continue;
-        }
-        let name = entry.name().rsplit('/').next().unwrap_or_default().to_string();
-        let mut bytes = Vec::with_capacity(entry.size() as usize);
-        entry.read_to_end(&mut bytes)?;
-
-        if name == "metadata.json" {
-            metadata = serde_json::from_slice(&bytes).context("parsing metadata.json")?;
-            continue;
-        }
-        if page_number(&name).is_some() {
-            pages.push((name, String::from_utf8(bytes).context("page HTML is not UTF-8")?));
-            continue;
-        }
-        assets.insert(name, bytes);
-    }
-
-    pages.sort_by_key(|(name, _)| page_number(name));
-    Ok(Bundle { pages, assets, metadata })
+    ZipArchive::new(file).with_context(|| format!("reading zip {}", path.display()))
 }
 
-/// `page_012.html` -> 12
-fn page_number(name: &str) -> Option<u32> {
-    name.strip_prefix("page_")?.strip_suffix(".html")?.parse().ok()
+fn read_entry(zip: &mut ZipArchive<File>, name: &str) -> Result<Vec<u8>> {
+    let mut entry = zip.by_name(name).with_context(|| format!("zip has no {name}"))?;
+    let mut bytes = Vec::with_capacity(entry.size() as usize);
+    entry.read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
+/// Render one HTML page to a single-page document sized from metadata.json.
 fn render_page(
-    html: &str,
-    assets: &BTreeMap<String, Vec<u8>>,
+    zip: &mut ZipArchive<File>,
+    page: &PageMeta,
     fonts: &BTreeMap<String, Base64OrRaw>,
     pool: &SharedFontPool,
-    (width, height): (f32, f32),
     warnings: &mut Vec<PdfWarnMsg>,
 ) -> Result<PdfDocument> {
-    // Only hand over the images this page references: printpdf decodes every entry.
-    let images = assets
-        .iter()
-        .filter(|(name, _)| html.contains(&format!("src=\"{name}\"")))
-        .map(|(name, bytes)| (name.clone(), Base64OrRaw::Raw(bytes.clone())))
-        .collect();
+    let html = String::from_utf8(read_entry(zip, &page.html)?).context("page HTML is not UTF-8")?;
+    let images = BTreeMap::from([(page.image.clone(), Base64OrRaw::Raw(read_entry(zip, &page.image)?))]);
+    let (width, height) = page.size_mm();
     let options = GeneratePdfOptions {
         page_width: Some(width),
         page_height: Some(height),
@@ -177,52 +145,22 @@ fn render_page(
         margin_left: Some(0.0),
         ..Default::default()
     };
-    PdfDocument::from_html_with_cache(html, &images, fonts, &options, warnings, Some(pool.clone()))
-        .map_err(anyhow::Error::msg)
-}
-
-/// Page size in mm: `<meta name="pdf.options.pageWidth">` wins, then metadata.json, then
-/// the `.page { width: Xpt; height: Ypt }` rule, then A4.
-fn page_size_mm(html: &str, metadata: &Metadata, name: &str) -> (f32, f32) {
-    let from_meta_tags = || Some((meta_content(html, "pdf.options.pageWidth")?, meta_content(html, "pdf.options.pageHeight")?));
-    let from_metadata = || {
-        metadata
-            .pages
-            .iter()
-            .find(|p| p.html == name)
-            .map(|p| (p.width_pt * MM_PER_PT, p.height_pt * MM_PER_PT))
-    };
-    let from_css = || Some((css_pt(html, "width")? * MM_PER_PT, css_pt(html, "height")? * MM_PER_PT));
-    from_meta_tags().or_else(from_metadata).or_else(from_css).unwrap_or(A4_MM)
-}
-
-fn meta_content(html: &str, name: &str) -> Option<f32> {
-    let tag_start = html.find(&format!("name=\"{name}\""))?;
-    let tag = &html[tag_start..tag_start + html[tag_start..].find('>')?];
-    let value = tag.split("content=\"").nth(1)?.split('"').next()?;
-    value.trim().parse().ok()
-}
-
-/// First `<prop>: <n>pt` inside the `.page {` rule.
-fn css_pt(html: &str, prop: &str) -> Option<f32> {
-    let rule_start = html.find(".page {")?;
-    let rule = &html[rule_start..rule_start + html[rule_start..].find('}')?];
-    rule.lines()
-        .map(str::trim)
-        .find_map(|line| line.strip_prefix(prop)?.trim_start().strip_prefix(':'))
-        .and_then(|v| v.trim().trim_end_matches(';').strip_suffix("pt"))
-        .and_then(|v| v.trim().parse().ok())
-}
-
-fn make_text_visible(html: &str) -> String {
-    html.replacen("color: transparent;", "color: rgba(255, 0, 0, 0.6);", 1)
+    let doc = PdfDocument::from_html_with_cache(&html, &images, fonts, &options, warnings, Some(pool.clone()))
+        .map_err(anyhow::Error::msg)?;
+    match doc.pages.len() {
+        1 => Ok(doc),
+        0 => bail!("printpdf produced no page"),
+        n => bail!("content overflowed into {n} pages; the page box must fit the page size"),
+    }
 }
 
 fn load_fonts(specs: &[String]) -> Result<BTreeMap<String, Base64OrRaw>> {
     specs
         .iter()
         .map(|spec| {
-            let (name, path) = spec.split_once('=').with_context(|| format!("--font expects NAME=PATH, got '{spec}'"))?;
+            let (name, path) = spec
+                .split_once('=')
+                .with_context(|| format!("--font expects NAME=PATH, got '{spec}'"))?;
             let bytes = std::fs::read(path).with_context(|| format!("reading font {path}"))?;
             Ok((name.to_string(), Base64OrRaw::Raw(bytes)))
         })
@@ -254,40 +192,28 @@ fn report_warnings(warnings: &[PdfWarnMsg], verbose: bool) {
 mod tests {
     use super::*;
 
-    const HTML: &str = r#"<head>
-<meta name="pdf.options.pageWidth" content="210.0016">
-<meta name="pdf.options.pageHeight" content="297.0001">
-<style>
-  .page {
-    position: relative;
-    width: 612.00pt;
-    height: 792.00pt;
-  }
-</style>"#;
+    const METADATA: &str = r#"{
+        "engine": "tesseract",
+        "page_count": 2,
+        "pages": [
+            {"page_num": 1, "html": "page_002.html", "image": "page_002.png", "width_pt": 612.0, "height_pt": 792.0, "words": 3},
+            {"page_num": 0, "html": "page_001.html", "image": "page_001.png", "width_pt": 595.28, "height_pt": 841.89, "words": 5}
+        ]
+    }"#;
 
     #[test]
-    fn page_numbers() {
-        assert_eq!(page_number("page_001.html"), Some(1));
-        assert_eq!(page_number("page_120.html"), Some(120));
-        assert_eq!(page_number("page_001.png"), None);
-        assert_eq!(page_number("metadata.json"), None);
-    }
-
-    #[test]
-    fn size_from_meta_tags() {
-        let (w, h) = page_size_mm(HTML, &Metadata::default(), "page_001.html");
-        assert!((w - 210.0016).abs() < 1e-3 && (h - 297.0001).abs() < 1e-3);
-    }
-
-    #[test]
-    fn size_from_css() {
-        let html = HTML.replace("pdf.options.page", "x");
-        let (w, h) = page_size_mm(&html, &Metadata::default(), "page_001.html");
+    fn parses_manifest_and_converts_sizes() {
+        let meta: Metadata = serde_json::from_str(METADATA).unwrap();
+        assert_eq!(meta.engine, "tesseract");
+        let (w, h) = meta.pages[0].size_mm();
         assert!((w - 215.9).abs() < 0.01 && (h - 279.4).abs() < 0.01);
+        let (w, h) = meta.pages[1].size_mm();
+        assert!((w - 210.0).abs() < 0.01 && (h - 297.0).abs() < 0.01);
     }
 
     #[test]
-    fn size_defaults_to_a4() {
-        assert_eq!(page_size_mm("<html></html>", &Metadata::default(), "page_001.html"), A4_MM);
+    fn font_spec_requires_name_and_path() {
+        assert!(load_fonts(&["no-equals-sign".into()]).is_err());
+        assert!(load_fonts(&["Name=/definitely/missing.ttf".into()]).is_err());
     }
 }
