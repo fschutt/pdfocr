@@ -355,9 +355,9 @@ Jobs:
    macOS Vision, and uploads each engine's zip as its own artifact (`ocr-tesseract`,
    `ocr-rapidocr`, …), plus `all-results` and `ocr-report`. It also writes a summary table
    (engine, model, words, confidence, time, status) to the run page.
-3. **ocr-macos-vision** (macOS runner) runs macOS Vision when `engines` is `all` or names
-   `macos_vision`, and uploads `ocr-macos-vision`. Note that macOS runner minutes are billed at 10×
-   Linux on private repositories.
+3. **ocr-macos-vision** (macOS runner) runs macOS Vision when `engines` names `macos_vision`, or
+   is `all` and Vision can read `lang`, and uploads `ocr-macos-vision`. Note that macOS runner
+   minutes are billed at 10× Linux on private repositories.
 
 The page renders in `results/images/` are left out of the artifacts, since they are only OCR input.
 olmOCR is not run in CI.
