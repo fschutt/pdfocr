@@ -13,7 +13,7 @@ use zip::ZipArchive;
 
 const MM_PER_PT: f32 = 25.4 / 72.0;
 
-/// Convert a pdf-ocr-bench `pages.zip` (page_NNN.html + page_NNN.png + metadata.json) into one PDF.
+/// Convert a pdf-ocr-bench `pages.zip` (page_NNN.html + metadata.json) into one text-only PDF.
 #[derive(Parser, Debug)]
 #[command(version, about)]
 struct Args {
@@ -48,7 +48,6 @@ struct Metadata {
 struct PageMeta {
     page_num: u32,
     html: String,
-    image: String,
     width_pt: f32,
     height_pt: f32,
 }
@@ -134,7 +133,6 @@ fn render_page(
     warnings: &mut Vec<PdfWarnMsg>,
 ) -> Result<PdfDocument> {
     let html = String::from_utf8(read_entry(zip, &page.html)?).context("page HTML is not UTF-8")?;
-    let images = BTreeMap::from([(page.image.clone(), Base64OrRaw::Raw(read_entry(zip, &page.image)?))]);
     let (width, height) = page.size_mm();
     let options = GeneratePdfOptions {
         page_width: Some(width),
@@ -145,7 +143,7 @@ fn render_page(
         margin_left: Some(0.0),
         ..Default::default()
     };
-    let doc = PdfDocument::from_html_with_cache(&html, &images, fonts, &options, warnings, Some(pool.clone()))
+    let doc = PdfDocument::from_html_with_cache(&html, &BTreeMap::new(), fonts, &options, warnings, Some(pool.clone()))
         .map_err(anyhow::Error::msg)?;
     match doc.pages.len() {
         1 => Ok(doc),
@@ -196,8 +194,8 @@ mod tests {
         "engine": "tesseract",
         "page_count": 2,
         "pages": [
-            {"page_num": 1, "html": "page_002.html", "image": "page_002.png", "width_pt": 612.0, "height_pt": 792.0, "words": 3},
-            {"page_num": 0, "html": "page_001.html", "image": "page_001.png", "width_pt": 595.28, "height_pt": 841.89, "words": 5}
+            {"page_num": 1, "html": "page_002.html", "width_pt": 612.0, "height_pt": 792.0, "words": 3},
+            {"page_num": 0, "html": "page_001.html", "width_pt": 595.28, "height_pt": 841.89, "words": 5}
         ]
     }"#;
 

@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from .base import OcrEngine, PageTimeout
+from .base import OcrEngine, PageTimeout, Route
 from .doctr_engine import DoctrEngine
 from .easyocr_engine import EasyOcrEngine
+from .macos_vision_engine import MacOSVisionEngine
 from .ocrmypdf_engine import OcrmypdfEngine
 from .ocrmypdf_rapid_engine import OcrmypdfRapidEngine
 from .olmocr_engine import OlmOcrEngine
@@ -24,9 +25,19 @@ ENGINES: dict[str, type[OcrEngine]] = {
         SuryaEngine,
         OcrmypdfEngine,
         OcrmypdfRapidEngine,
+        MacOSVisionEngine,
         OlmOcrEngine,
     )
 }
+
+
+def _names(spec: str) -> list[str]:
+    return [n.strip().lower().replace("-", "_") for n in (spec or "").split(",") if n.strip()]
+
+
+def is_all(spec: str) -> bool:
+    """`all` selects whatever can run; an explicit list asks for exactly those engines."""
+    return _names(spec) in ([], ["all"])
 
 
 def select_engines(spec: str, include_gpu: bool = False) -> list[type[OcrEngine]]:
@@ -34,8 +45,8 @@ def select_engines(spec: str, include_gpu: bool = False) -> list[type[OcrEngine]
 
     Naming a GPU engine explicitly runs it regardless of `include_gpu`.
     """
-    names = [n.strip().lower().replace("-", "_") for n in spec.split(",") if n.strip()]
-    if not names or names == ["all"]:
+    names = _names(spec)
+    if is_all(spec):
         return [cls for cls in ENGINES.values() if include_gpu or not cls.requires_gpu]
     unknown = [n for n in names if n not in ENGINES]
     if unknown:
@@ -43,4 +54,4 @@ def select_engines(spec: str, include_gpu: bool = False) -> list[type[OcrEngine]
     return [ENGINES[n] for n in dict.fromkeys(names)]
 
 
-__all__ = ["ENGINES", "OcrEngine", "PageTimeout", "select_engines"]
+__all__ = ["ENGINES", "OcrEngine", "PageTimeout", "Route", "is_all", "select_engines"]

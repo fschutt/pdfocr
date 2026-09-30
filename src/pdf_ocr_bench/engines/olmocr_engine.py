@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-import os
 import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
+from ..languages import Language
 from ..models import BBox, OcrWord, PageImage
-from .base import OcrEngine, PageTimeout, split_block
+from .base import OcrEngine, Option, PageTimeout, Route, split_block
 from .ocrmypdf_engine import image_to_pdf
 
 DEFAULT_MODEL = "allenai/olmOCR-7B-0725"
@@ -21,8 +21,8 @@ class OlmOcrEngine(OcrEngine):
     text without positions, so lines are spread evenly over the page's ink bounding box:
     good enough for search/copy-paste, not for exact word overlay.
 
-    Env: OLMOCR_MODEL (default allenai/olmOCR-7B-0725, e.g. the -FP8 variant),
-    OLMOCR_SERVER (an existing vLLM-compatible endpoint, skips spawning one).
+    Options: `model` (e.g. the -FP8 variant), `server` (an existing vLLM-compatible endpoint,
+    instead of spawning one).
     """
 
     name = "olmocr"
@@ -30,12 +30,21 @@ class OlmOcrEngine(OcrEngine):
     requires_gpu = True
     handles_timeout = True
     reports_confidence = False
+    model = f"olmOCR 7B VLM ({DEFAULT_MODEL}) through olmocr.pipeline and vLLM; GPU recommended"
+    options = {
+        "model": Option(DEFAULT_MODEL, "Hugging Face model id or local path"),
+        "server": Option("", "URL of a running vLLM-compatible server (empty = spawn one)"),
+    }
+
+    @classmethod
+    def route(cls, languages: list[Language]) -> Route:
+        return Route(detail="automatic (VLM)")
 
     def prepare(self) -> None:
         import olmocr  # noqa: F401 - fail early if missing
 
         self._tmp = Path(tempfile.mkdtemp(prefix="olmocr_"))
-        self._model = os.environ.get("OLMOCR_MODEL", DEFAULT_MODEL)
+        self._model = self.opts["model"]
         self.log.info(f"model {self._model} — expect several minutes per page on CPU")
 
     def close(self) -> None:
@@ -57,7 +66,7 @@ class OlmOcrEngine(OcrEngine):
 
     def _run(self, workspace: Path, pdf: Path) -> None:
         cmd = [sys.executable, "-m", "olmocr.pipeline", str(workspace), "--markdown", "--pdfs", str(pdf), "--model", self._model]
-        server = os.environ.get("OLMOCR_SERVER")
+        server = self.opts["server"]
         if server:
             cmd += ["--server", server]
         try:

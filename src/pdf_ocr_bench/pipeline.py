@@ -6,13 +6,15 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from .engines import OcrEngine, PageTimeout, select_engines
+from .engines import OcrEngine, PageTimeout, Route
 from .evaluation import compare, print_ranking, rank
 from .html_output.renderer import load_template, page_count, render_pdf_pages
 from .html_output.zipper import create_engine_zip
-from .lang_map import html_lang, is_known
+from .languages import html_lang
 from .log import get_logger
 from .models import EngineReport, OcrResult, PageImage, PageResult, Report
+from .plan import InputError, check_page_spec, log_plan, make_plan
+from .preprocess import apply_filters
 
 log = get_logger("Pipeline")
 
@@ -28,6 +30,8 @@ class PipelineConfig:
     timeout_per_page: int = 300
     include_gpu_engines: bool = False
     report_path: Path | None = None
+    preprocess: str | None = None
+    engine_options: tuple[str, ...] = ()  # "ENGINE.KEY=VALUE"
 
 
 def parse_page_range(spec: str | None, count: int) -> list[int]:
@@ -39,38 +43,43 @@ def parse_page_range(spec: str | None, count: int) -> list[int]:
         start, _, end = part.partition("-")
         lo, hi = int(start), int(end or start)
         if lo < 1 or hi < lo:
-            raise ValueError(f"invalid page range '{part}'")
+            raise InputError(f"invalid page range '{part}'")
         pages.update(range(lo - 1, min(hi, count)))
     if not pages:
-        raise ValueError(f"page range '{spec}' selects no pages (document has {count})")
+        raise InputError(f"page range '{spec}' selects no pages (document has {count})")
     return sorted(pages)
 
 
 def run(cfg: PipelineConfig) -> Report:
     if not cfg.input_pdf.is_file():
-        raise FileNotFoundError(cfg.input_pdf)
-    if not is_known(cfg.lang):
-        log.warning(f"language '{cfg.lang}' has no mapping for non-Tesseract engines; they fall back to English")
-
-    engine_classes = select_engines(cfg.engines, cfg.include_gpu_engines)
+        raise InputError(f"input PDF not found: {cfg.input_pdf}")
+    check_page_spec(cfg.pages)
+    plan = make_plan(cfg.engines, cfg.lang, cfg.preprocess, cfg.include_gpu_engines, engine_options=cfg.engine_options)
     pages = parse_page_range(cfg.pages, page_count(cfg.input_pdf))
-    log.info(f"Input {cfg.input_pdf}: {len(pages)} page(s), lang={cfg.lang}, engines={[c.name for c in engine_classes]}")
+    log.info(f"Input {cfg.input_pdf}: {len(pages)} page(s)")
+    log_plan(plan)
 
     images = render_pdf_pages(cfg.input_pdf, cfg.output_dir / "images", cfg.dpi, pages)
+    preprocess_images(images, plan.filters)
     template = load_template()
+    page_lang = html_lang(plan.languages)
 
     results: dict[str, OcrResult] = {}
-    reports: list[EngineReport] = []
-    for i, cls in enumerate(engine_classes, 1):
-        log.info(f"=== Engine {i}/{len(engine_classes)}: {cls.display_name} ===")
-        result, report = run_engine(cls, cfg, images)
+    reports = [
+        EngineReport(name=p.engine.name, display_name=p.engine.display_name, success=False, error=f"skipped: {p.route.unsupported}")
+        for p in plan.skipped
+    ]
+    for i, p in enumerate(plan.runnable, 1):
+        cls = p.engine
+        log.info(f"=== Engine {i}/{len(plan.runnable)}: {cls.display_name} ===")
+        result, report = run_engine(cls, p.route, p.options, cfg, images)
         reports.append(report)
         if result is None:
             continue
         zip_path = cfg.output_dir / cls.name / "pages.zip"
         log.info(f"Creating zip: {zip_path}")
         try:
-            create_engine_zip(result, images, zip_path, template, html_lang(cfg.lang), cls.reports_confidence)
+            create_engine_zip(result, images, zip_path, template, page_lang, cls.reports_confidence)
         except Exception as exc:  # noqa: BLE001 - e.g. disk full; keep the other engines
             report.success = False
             report.error = f"zip failed: {type(exc).__name__}: {exc}"
@@ -81,8 +90,9 @@ def run(cfg: PipelineConfig) -> Report:
 
     report = Report(
         input_pdf=str(cfg.input_pdf),
-        lang=cfg.lang,
+        lang="+".join(lang.code for lang in plan.languages),
         dpi=cfg.dpi,
+        preprocess=plan.filters,
         pages=[p + 1 for p in pages],
         engines=reports,
     )
@@ -94,11 +104,24 @@ def run(cfg: PipelineConfig) -> Report:
     return report
 
 
-def run_engine(cls: type[OcrEngine], cfg: PipelineConfig, images: list[PageImage]) -> tuple[OcrResult | None, EngineReport]:
-    """Never raises: any failure is logged and recorded in the returned report."""
-    report = EngineReport(name=cls.name, display_name=cls.display_name, success=False)
+def preprocess_images(images: list[PageImage], filters: list[str]) -> None:
+    if not filters:
+        return
     start = time.perf_counter()
-    engine = cls(lang=cfg.lang, timeout=cfg.timeout_per_page)
+    for image in images:
+        apply_filters(image.path, filters)
+    log.info(f"Preprocessed {len(images)} pages ({' -> '.join(filters)}) in {time.perf_counter() - start:.1f}s")
+
+
+def run_engine(
+    cls: type[OcrEngine], route: Route, options: dict, cfg: PipelineConfig, images: list[PageImage]
+) -> tuple[OcrResult | None, EngineReport]:
+    """Never raises: any failure is logged and recorded in the returned report."""
+    start = time.perf_counter()
+    engine = cls(route, timeout=cfg.timeout_per_page, options=options)
+    report = EngineReport(
+        name=cls.name, display_name=cls.display_name, success=False, route=route.detail, options=engine.opts
+    )
     try:
         engine.prepare()
     except Exception as exc:  # noqa: BLE001 - one broken engine must not stop the run

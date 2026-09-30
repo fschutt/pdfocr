@@ -4,9 +4,10 @@ import re
 import threading
 import time
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Any, Callable, ClassVar, Iterable, TypeVar
 
-from ..lang_map import get_lang
+from ..languages import Language
 from ..log import get_logger
 from ..models import BBox, OcrWord, PageImage, PageResult
 
@@ -17,8 +18,67 @@ class PageTimeout(Exception):
     pass
 
 
+@dataclass(frozen=True)
+class Route:
+    """How an engine handles the requested languages, decided before any engine runs."""
+
+    lang: Any = None  # engine-specific language argument (code, tuple of codes, model family)
+    detail: str = ""  # the model choice, for logs and the report
+    unsupported: str | None = None  # why the engine cannot handle these languages
+
+    @property
+    def ok(self) -> bool:
+        return self.unsupported is None
+
+
+def unsupported(reason: str) -> Route:
+    return Route(unsupported=reason)
+
+
+@dataclass(frozen=True)
+class Option:
+    """A tunable engine parameter, set with `-O ENGINE.KEY=VALUE` and validated before a run."""
+
+    default: Any
+    help: str
+    choices: tuple[Any, ...] | None = None
+    minimum: float | None = None
+    maximum: float | None = None
+
+    @property
+    def kind(self) -> type:
+        return type(self.default)
+
+    def parse(self, raw: str) -> Any:
+        text = raw.strip()
+        if self.kind is bool:
+            if text.lower() in ("1", "true", "yes", "on"):
+                return True
+            if text.lower() in ("0", "false", "no", "off"):
+                return False
+            raise ValueError("expected true or false")
+        try:
+            value = self.kind(text)
+        except ValueError:
+            raise ValueError(f"expected {self.kind.__name__}") from None
+        if self.choices is not None and value not in self.choices:
+            raise ValueError(f"expected one of {', '.join(map(str, self.choices))}")
+        if self.minimum is not None and value < self.minimum or self.maximum is not None and value > self.maximum:
+            raise ValueError(f"expected {self.minimum}..{self.maximum}")
+        return value
+
+    def domain(self) -> str:
+        if self.choices is not None:
+            return "|".join(map(str, self.choices))
+        if self.kind is bool:
+            return "true|false"
+        if self.minimum is not None or self.maximum is not None:
+            return f"{self.minimum:g}..{self.maximum:g}"
+        return self.kind.__name__
+
+
 class OcrEngine(ABC):
-    """One OCR backend. Subclasses implement `ocr_page`; everything else is shared."""
+    """One OCR backend. Subclasses implement `route` and `ocr_page`; everything else is shared."""
 
     name: ClassVar[str]
     display_name: ClassVar[str]
@@ -27,12 +87,35 @@ class OcrEngine(ABC):
     handles_timeout: ClassVar[bool] = False
     # False for engines whose output carries no confidence (PDF text layers, VLM text).
     reports_confidence: ClassVar[bool] = True
+    # What the engine runs, for `--help` and `pdf-ocr-bench engines`.
+    model: ClassVar[str] = ""
+    options: ClassVar[dict[str, Option]] = {}
 
-    def __init__(self, lang: str = "eng", timeout: float | None = None):
-        self.tesseract_lang = lang
-        self.lang = get_lang(lang, self.name)
+    def __init__(self, route: Route, timeout: float | None = None, options: dict[str, Any] | None = None):
+        if not route.ok:
+            raise ValueError(f"{self.display_name}: {route.unsupported}")
+        unknown = set(options or {}) - set(self.options)
+        if unknown:
+            raise ValueError(f"{self.display_name}: unknown option(s) {', '.join(sorted(unknown))}")
+        self.route_info = route
+        self.lang = route.lang
         self.timeout = timeout or None
+        self.opts = {key: option.default for key, option in self.options.items()} | (options or {})
         self.log = get_logger(self.display_name)
+
+    @classmethod
+    def route(cls, languages: list[Language]) -> Route:
+        """Pick the model for `languages`, or say why this engine cannot read them.
+
+        Static: depends only on the languages, never on this machine, so inputs can be
+        validated before anything is installed (the workflow does that first).
+        """
+        return Route(detail="language-independent")
+
+    @classmethod
+    def preflight(cls, route: Route) -> Route:
+        """Check `route` against this machine (installed models, platform) before a run."""
+        return route
 
     def prepare(self) -> None:
         """Import the backend and load models. Called once before the first page."""
@@ -41,14 +124,20 @@ class OcrEngine(ABC):
         """Release resources (servers, temp dirs)."""
 
     @abstractmethod
-    def ocr_page(self, image: PageImage, lang: str) -> list[OcrWord]:
+    def ocr_page(self, image: PageImage, lang: Any) -> list[OcrWord]:
         ...
 
     def run(self, image: PageImage) -> PageResult:
         start = time.perf_counter()
         call = lambda: self.ocr_page(image, self.lang)  # noqa: E731
         words = call() if self.handles_timeout else run_with_timeout(call, self.timeout)
-        words = [w for w in words if w.text.strip() and w.bbox.w > 0 and w.bbox.h > 0]
+        words = [
+            part
+            for w in words
+            if w.bbox.w > 0 and w.bbox.h > 0
+            # a word never contains whitespace; split what an engine returned joined
+            for part in split_line(w.text.strip(), w.bbox, w.confidence)
+        ]
         return PageResult(
             page_num=image.page_num,
             width_px=image.width_px,

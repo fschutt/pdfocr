@@ -1,9 +1,10 @@
 # pdf-ocr-bench
 
 Run several OCR engines on a scanned (image-only) PDF and compare them. For **each engine** the
-result is a `.zip` of HTML pages: the original page as background image with every recognized word
-absolutely positioned on top, as invisible but selectable text. A separate Rust tool,
-[`html2pdf`](html2pdf/), turns the zip you like best into the final searchable PDF.
+result is a small `.zip` of HTML pages: every recognized word in black, absolutely positioned where
+it was on the scanned page. A separate Rust tool, [`html2pdf`](html2pdf/), turns the zip you like
+best into the final PDF. That PDF holds only the text, with no scan, so it stays small and fully
+searchable. It is meant for archiving and search, not for reproducing the scan.
 
 ```
 input.pdf
@@ -31,60 +32,208 @@ input.pdf
 PDF text layers go wrong in ways that are hard to see: broken `ToUnicode` maps, wrong cmaps,
 invisible text that copy-pastes as garbage. Positioned HTML avoids that:
 
-* every engine's result can be opened in a browser (press **`d`** to show the OCR text in red),
+* every engine's result can be opened in a browser (press **`d`** to outline the word boxes),
 * the text is plain UTF-8, so there are no encoding problems,
 * engines can be compared side by side,
 * `html2pdf` controls font embedding when the PDF is finally written.
 
+## Run locally
+
+From a fresh clone, one step after another (macOS with Homebrew, or Debian/Ubuntu):
+
+```sh
+git clone https://github.com/fschutt/pdfocr && cd pdfocr
+make setup OCR_LANG=deu+eng      # system packages, .venv with every engine, html2pdf
+make test                        # unit tests; on a Mac also the macOS Vision tests
+make check PDF=scan.pdf OCR_LANG=deu+eng                 # validate + show which model each engine uses
+make ocr   PDF=scan.pdf OCR_LANG=deu+eng PREPROCESS=grayscale,deskew,denoise \
+           OPTIONS="macos_vision.level=accurate tesseract.psm=6"
+make pdfs                        # results/<engine>.pdf for every engine
+make all   PDF=scan.pdf OCR_LANG=deu+eng                 # all of the above in one go
+```
+
+`make ocr` also takes `ENGINES=`, `DPI=`, `PAGES=` and `OUT=`. The variable is `OCR_LANG`
+because `LANG` is the locale. `make setup` runs `scripts/install_system_deps.sh`: on macOS,
+Homebrew's Python 3.12, Tesseract with all language models, ocrmypdf's tools, llama.cpp (Surya)
+and Rust; on Debian/Ubuntu, the apt packages for the requested languages, plus a hint for Rust
+>= 1.88 (rustup) and llama.cpp. On a Mac, `macos_vision` runs as part of `ENGINES=all`.
+
 ## Install
 
 ```sh
-pip install -e ".[ci]"         # all CPU engines
+pip install -e ".[ci]"         # all CPU engines (+ macOS Vision on macOS)
 pip install -e ".[tesseract,rapidocr,ocrmypdf]"   # or pick engines
 pip install -e ".[all]"        # + olmOCR
 ```
 
-System packages: `tesseract-ocr` plus language packs (`tesseract-ocr-deu`, …), and `ghostscript`,
-`qpdf`, `unpaper` and `pngquant` for ocrmypdf. Surya 2 needs a `llama-server` binary from
+System packages: `tesseract-ocr` plus the model packages for your languages
+(`pdf-ocr-bench tesseract-packages --lang deu+eng` prints them), and `ghostscript`, `qpdf`,
+`unpaper` and `pngquant` for ocrmypdf. Surya 2 needs a `llama-server` binary from
 [llama.cpp](https://github.com/ggml-org/llama.cpp/releases) on `PATH` for CPU, or vLLM for GPU.
+The `macos_vision` engine needs macOS.
+
+## Inputs
+
+```sh
+pdf-ocr-bench run INPUT_PDF [OPTIONS]
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `INPUT_PDF` | | The scanned (image-only) PDF |
+| `--lang` | `eng` | Document language(s): Tesseract codes joined with `+`, **main language first** (e.g. `deu+eng`). See [Languages](#languages). |
+| `-e, --engines` | `all` | `all`, or a comma list of `tesseract, rapidocr, paddleocr, easyocr, doctr, surya, ocrmypdf, ocrmypdf_rapid, macos_vision, olmocr` |
+| `--preprocess` | none | Image filters applied in order before OCR, e.g. `grayscale,deskew,denoise`. See [Preprocessing](#preprocessing). |
+| `-O, --engine-option` | none | Engine parameter `ENGINE.KEY=VALUE`, repeatable. See [Engine parameters](#engine-parameters). |
+| `--dpi` | `300` | Resolution the pages are rendered at for the engines (72–1200). 150 is a quick draft; 400–600 helps with small print. |
+| `--pages` | all | Page range, 1-based and inclusive: `3`, `1-5`, `1,3,7-10` |
+| `--timeout-per-page` | `300` | Seconds per page and engine before the page is skipped (`0` = no limit) |
+| `--include-gpu-engines` | off | With `--engines all`, also run GPU engines (olmOCR) |
+| `-o, --output-dir` | `results` | Where images, zips and the report go |
+| `--report` | `OUTPUT_DIR/report.json` | Report path |
+| `-v, --verbose` | off | Debug logging |
+
+**All input is validated before anything is rendered**, and bad input is rejected with a message
+saying what to change:
+
+* an unknown language code, filter or engine, or a malformed page range;
+* a page range outside the document;
+* an engine **named in `--engines`** that cannot read the requested languages (for example
+  `--engines doctr --lang chi_sim`: docTR only has Latin-script models), or whose models are
+  missing on this machine (a Tesseract language pack that is not installed).
+
+With `--engines all`, engines that cannot read the languages are skipped instead. The log and
+`report.json` say why. It is still an error if no engine at all can read them.
+
+Helper commands:
+
+```sh
+pdf-ocr-bench check --lang deu+eng --engines all --preprocess grayscale,denoise   # validate + show routing
+pdf-ocr-bench check --lang deu_frak --installed      # ... also against this machine's models
+pdf-ocr-bench languages                               # every --lang code and the model each engine uses
+pdf-ocr-bench filters                                 # the --preprocess filters
+pdf-ocr-bench tesseract-packages --lang deu_frak+eng  # apt packages for the Tesseract models
+pdf-ocr-bench engines                                 # every engine: its model and its -O parameters
+pdf-ocr-bench warmup --lang deu                       # load every routed engine once (downloads models)
+```
+
+Every run starts by logging how each engine was routed:
+
+```
+[Pipeline] Languages: deu (German), eng (English)
+[Pipeline] Preprocessing: grayscale -> denoise
+[Pipeline] Engine routing:
+[Pipeline]   tesseract       deu+eng
+[Pipeline]   rapidocr        latin (PP-OCRv5 mobile)
+[Pipeline]   paddleocr       de (PP-OCRv6 multilingual)
+[Pipeline]   easyocr         de, en
+[Pipeline]   doctr           multilingual PARSeq (HF hub)
+[Pipeline]   ocrmypdf        deu+eng
+[Pipeline]   ocrmypdf_rapid  -l deu: latin (PP-OCRv5 mobile)
+[Pipeline]   macos_vision    skipped: macOS only (Apple Vision framework)
+```
+
+### Languages
+
+`--lang` takes Tesseract codes. Each engine is routed to the model that covers **all** requested
+languages:
+
+| Code | Language | Tesseract | RapidOCR | PaddleOCR | EasyOCR | docTR | macOS Vision |
+|---|---|---|---|---|---|---|---|
+| `eng` | English | eng | PP-OCRv6 small | PP-OCRv6 multilingual | en | built-in | en-US |
+| `deu` | German | deu | latin PP-OCRv5 | PP-OCRv6 multilingual | de | multilingual PARSeq | de-DE |
+| `deu_frak` | German (Fraktur) | frk → Fraktur | latin PP-OCRv5 | PP-OCRv6 multilingual | de | multilingual PARSeq | de-DE |
+| `frk` | Fraktur | frk → Fraktur | latin PP-OCRv5 | PP-OCRv6 multilingual | de | multilingual PARSeq | de-DE |
+| `fra` | French | fra | latin PP-OCRv5 | PP-OCRv6 multilingual | fr | built-in | fr-FR |
+| `spa` `ita` `por` `nld` `pol` | Spanish, Italian, Portuguese, Dutch, Polish | same code | latin PP-OCRv5 | PP-OCRv6 multilingual | es it pt nl pl | multilingual PARSeq | es-ES it-IT pt-BR nl-NL pl-PL |
+| `lat` | Latin | lat | latin PP-OCRv5 | PP-OCRv6 multilingual | la | multilingual PARSeq | – |
+| `rus` `ukr` | Russian, Ukrainian | same code | eslav PP-OCRv5 | eslav PP-OCRv5 | ru uk | – | ru-RU uk-UA |
+| `ara` | Arabic | ara | arabic PP-OCRv5 | arabic PP-OCRv5 | ar | – | ar-SA |
+| `chi_sim` `chi_tra` | Chinese (Simplified, Traditional) | same code | PP-OCRv6 small | PP-OCRv6 multilingual | ch_sim ch_tra | – | zh-Hans zh-Hant |
+| `jpn` | Japanese | jpn | PP-OCRv6 small | PP-OCRv6 multilingual | ja | – | ja-JP |
+| `kor` | Korean | kor | korean PP-OCRv5 | korean PP-OCRv5 | ko | – | ko-KR |
+
+Surya and olmOCR are vision-language models and take no language setting. ocrmypdf uses the
+Tesseract models, and `ocrmypdf_rapid` uses RapidOCR's recognizers through its plugin.
+
+Combining languages (`deu+eng`, `chi_sim+eng`):
+
+* **Tesseract / ocrmypdf** load every model (`-l deu+eng`).
+* **RapidOCR, PaddleOCR, ocrmypdf_rapid** have one recognizer per script family, and each also
+  reads English. All non-English languages must share one recognizer: `deu+fra+eng` works,
+  `rus+deu` does not.
+* **EasyOCR** mixes Latin languages freely. A Cyrillic or Arabic language only combines with its
+  own script and English; Chinese, Japanese and Korean only combine with English.
+* **docTR** reads Latin-script languages only. English and French use the built-in model; other
+  languages need the multilingual PARSeq model from the Hugging Face hub, which knows ä, ö, ß.
+* **macOS Vision** takes any list of the languages it supports.
+
+Put the main language first: engines that pick a single model use the first non-English language.
+For German documents use `deu+eng`, not `eng+deu`. With `eng+deu`, RapidOCR still gets the Latin
+model (German is covered), but the page `lang` attribute becomes `en`.
+
+Fraktur: current Tesseract data has no `deu_frak` model. `deu_frak` and `frk` use `frk` (German
+Fraktur) or the `Fraktur` script model, whichever is installed (`tesseract-ocr-frk`,
+`tesseract-ocr-script-frak`). The other engines have no Fraktur model and read blackletter with
+their German/Latin model; comparing them is what this tool is for.
+
+### Preprocessing
+
+`--preprocess` applies filters to the page renders once, in the given order, before any engine
+runs, so every engine reads the same input:
+
+| Filter | Effect |
+|---|---|
+| `grayscale` | convert to 8-bit gray |
+| `autocontrast` | stretch contrast so ink is black and paper white (1% outliers ignored) |
+| `denoise` | 3×3 median filter; removes scanner speckle smaller than a stroke |
+| `sharpen` | unsharp mask for crisper stroke edges |
+| `binarize` | Otsu threshold to pure black and white |
+| `deskew` | straighten text lines (projection-profile search up to ±5°) |
+
+A good start for noisy scans is `grayscale,deskew,denoise`. On `sample.pdf` it removes all of
+Tesseract's speckle "words" and fixes `(a, 6` to `(ä, ö`. The trade-off: the median filter can erase
+the dots over small capitals (`Ä` becomes `A`), so raise `--dpi` for small print. Use `binarize`
+with care: Tesseract often likes it, while the neural engines usually do better on gray.
+
+### Engine parameters
+
+Each engine has a few parameters, set with `-O ENGINE.KEY=VALUE` (repeatable) and validated
+before the run like everything else. An unknown engine or key, a value outside its range, or an
+engine that is not selected is rejected. `pdf-ocr-bench engines` and the end of
+`pdf-ocr-bench run --help` list them, generated from the code:
+
+| Engine | Model | Parameters (default) |
+|---|---|---|
+| `tesseract` | Tesseract 5 LSTM models, one per `--lang` code | `psm=3`: page segmentation mode (1, 3–13; 3 automatic, 4 one column, 6 one block, 11 sparse text) |
+| `rapidocr` | PP-OCR on ONNX Runtime (PP-OCRv6 small for en/zh/ja, PP-OCRv5 mobile otherwise) | `min_score=0.5` (0–1): drop lines recognized below it; `text_orientation=true`: turn upside-down lines |
+| `paddleocr` | PaddleOCR 3.x (PP-OCRv6 medium multilingual, or the PP-OCRv5 model of the script) | `min_score=0.0` (0–1); `textline_orientation=true` |
+| `easyocr` | CRAFT detector + one CRNN recognizer per script group | `decoder=greedy` (greedy, beamsearch, wordbeamsearch) |
+| `doctr` | detector + CRNN (en/fr) or multilingual PARSeq | `det_arch=fast_base` (fast_*, db_*, linknet_*); `straight_pages=true` |
+| `surya` | Surya 2 VLM via llama.cpp / vLLM | none |
+| `ocrmypdf` | ocrmypdf with Tesseract | `psm=3` (as Tesseract) |
+| `ocrmypdf_rapid` | ocrmypdf with the RapidOCR plugin | none |
+| `macos_vision` | Apple Vision `VNRecognizeTextRequest` (Live Text) | `level=accurate` (accurate, fast); `language_correction=true`; `min_text_height=0.0` (0–1 of the page height) |
+| `olmocr` | olmOCR 7B VLM | `model=allenai/olmOCR-7B-0725` (HF id or path, e.g. the FP8 variant); `server=` (URL of a running vLLM, empty = spawn one) |
+
+The report records every engine's effective parameters next to its model.
 
 ## Usage
 
 ```sh
-pdf-ocr-bench run INPUT_PDF [OPTIONS]
-
-  -o, --output-dir PATH       Output directory [default: results]
-  -e, --engines TEXT          Comma-separated engines [default: all]
-  --lang TEXT                 Document language as Tesseract code [default: eng]
-                              e.g. eng, deu, fra, deu_frak, frk, chi_sim, jpn, ara, rus, lat
-                              Compound: eng+deu (Tesseract tries both)
-  --dpi INT                   Render DPI [default: 300]
-  --pages TEXT                Page range, e.g. "1-5" or "1,3,7-10" [default: all]
-  --timeout-per-page INT      Seconds before skipping a page for an engine (0 = no limit) [default: 300]
-  --include-gpu-engines       Also run GPU-requiring engines (olmOCR)
-  --report PATH               Report path [default: OUTPUT_DIR/report.json]
-  -v, --verbose               Debug logging
-
-pdf-ocr-bench engines         # list engines
-pdf-ocr-bench warmup --lang deu   # load every engine once (downloads models)
-```
-
-Example:
-
-```sh
-pdf-ocr-bench run sample.pdf --lang eng+deu --dpi 200
-cargo run --release --manifest-path html2pdf/Cargo.toml -- results/tesseract/pages.zip -o final.pdf
+pdf-ocr-bench run scan.pdf --lang deu+eng --preprocess grayscale,deskew,denoise
+cargo run --release --manifest-path html2pdf/Cargo.toml -- results/rapidocr/pages.zip -o final.pdf
 ```
 
 Every log line is flushed right away (for live GitHub Actions logs):
 
 ```
-[Pipeline] Rendering pages at 200 DPI...
-[Pipeline] Rendered 2 pages in 0.5s
-[Pipeline] === Engine 1/8: Tesseract ===
-[Tesseract] Page 1/2: 100 words, 0.9s, avg conf 0.95
-[Tesseract] Page 2/2: 60 words, 0.8s, avg conf 0.94
-[Pipeline] Tesseract complete: 160 words total, 1.9s
+[Pipeline] Rendering pages at 300 DPI...
+[Pipeline] Rendered 2 pages in 0.8s
+[Pipeline] === Engine 1/7: Tesseract ===
+[Tesseract] Page 1/2: 113 words, 1.2s, avg conf 0.91
+[Tesseract] Page 2/2: 65 words, 1.1s, avg conf 0.82
+[Pipeline] Tesseract complete: 178 words total, 2.4s
 [Pipeline] Creating zip: results/tesseract/pages.zip
 ...
 [Evaluation] Computing cross-engine CER matrix...
@@ -105,48 +254,55 @@ results/
 └── report.json
 ```
 
-`pages.zip`:
+`pages.zip` holds only text, a few KB per page:
 
 ```
-page_001.html   page_001.png   page_002.html   page_002.png   …   metadata.json
+page_001.html   page_002.html   …   metadata.json
 ```
+
+The page renders in `results/images/` are the OCR input. They are shared by all engines and never
+go into a zip.
 
 Each HTML page has fixed `pt` dimensions (the source PDF page size), `<meta name="pdf.options.pageWidth/
-pageHeight">` in mm for converters, and one `<span class="word">` per word. The span's
-`left/top/width/height` are percentages of the page, and it carries `data-confidence`. Font size
-follows `bbox.h × page_height_pt × 0.8`, using the tallest box on the word's line so a line has
-one size. It is then capped so the word fits its box width (otherwise PDF extractors merge
-neighbouring words). Words are centered vertically on their line, and every word except the last
-on a line ends with a space, so copy-paste keeps word boundaries.
+pageHeight">` in mm for converters, and one `<span class="word">` per word. The span's `left`,
+`width` and `height` are the OCR box as percentages of the page, and it carries `data-confidence`.
+The text is black Helvetica (`Helvetica, Arial, sans-serif`); layout lives in
+`html_output/layout.py`:
+
+* **Size**: each word is measured with Helvetica's real glyph widths. PyMuPDF's built-in
+  Helvetica has the same letter, digit and umlaut widths as the Helvetica printpdf embeds, and as
+  Arial. The size at which
+  a word exactly spans its OCR box is computed per word, and the line uses the median, so a line
+  has one size and one badly boxed word cannot distort it. A word only gets smaller than its line
+  if it would otherwise run into the next word (never below half the line size). As a guard,
+  the size is capped at 1.5× the line's tallest box.
+* **Position**: words keep their OCR x. Vertically, every span is centered on the median center of
+  its line's boxes. That is stable across engines (Tesseract returns tight ink boxes,
+  RapidOCR/PaddleOCR padded detection boxes) and across words with or without descenders.
+* Every word except the last on a line ends with a space, so copy-paste and PDF text extraction
+  keep the word boundaries.
 
 `metadata.json` is the zip's manifest. It holds the engine name, page count, total words, elapsed
 time and average confidence (`null` for engines that report no confidence). Per page, it holds the
-HTML and image file names, the page size in px and pt, words, confidence, time, and any
-skip/error. `html2pdf` reads page order and sizes from it.
+HTML file name, the page size in px and pt, words, confidence, time, and any skip/error.
+`html2pdf` reads page order and sizes from it.
 
 ## Engines
 
 | Engine | Word boxes | Notes |
 |---|---|---|
-| `tesseract` | native | `deu_frak` falls back to `frk` / the `Fraktur` script model if not installed |
-| `rapidocr` | native (`return_word_box`) | non-ch/en scripts use the PP-OCRv5 mobile recognizers |
-| `paddleocr` | native (`return_word_box`, fragments re-joined at spaces) | runs with `enable_mkldnn=False`: PaddlePaddle 3.x oneDNN crashes on CPU |
+| `tesseract` | native | languages resolved against the installed models (`tesseract --list-langs`) |
+| `rapidocr` | native (`return_word_box`) | PP-OCRv6 for en/zh/ja, PP-OCRv5 mobile for Latin, East Slavic, Arabic, Korean |
+| `paddleocr` | native (`return_word_box`); the recognized line text decides word boundaries | runs with `enable_mkldnn=False` (PaddlePaddle 3.x oneDNN crashes on CPU); slow on CPU, about 2 min per page at 300 DPI |
 | `easyocr` | line boxes split by character count | |
-| `doctr` | native | non-Latin languages try the multilingual PARSeq model from the HF hub |
+| `doctr` | native | multilingual PARSeq from the HF hub for languages beyond English/French |
 | `surya` | block boxes, lines spread evenly | Surya 2 is a VLM served by llama.cpp/vLLM; slow on CPU |
 | `ocrmypdf` | read back from the PDF text layer (PyMuPDF) | run per page on a PDF built from the shared image; no confidence |
-| `ocrmypdf_rapid` | same, with `--plugin ocrmypdf_rapidocr` | single language only |
-| `olmocr` | none, lines spread over the ink area | 7B VLM (`allenai/olmOCR-7B-0725`, `OLMOCR_MODEL` to change, `OLMOCR_SERVER` for a running vLLM); minutes per page on CPU, so opt-in |
+| `ocrmypdf_rapid` | same, with `--plugin ocrmypdf_rapidocr` | one language; PP-OCRv5 recognizers are selected with a generated `--rapidocr-config-path` |
+| `macos_vision` | per word (`boundingBoxForRange`) | Apple Vision `VNRecognizeTextRequest`: the recognizer behind Live Text in Preview and Photos, called directly (Preview's VisionKit API only exposes plain text). **macOS only**; `pip install ".[macos-vision]"` (pyobjc) |
+| `olmocr` | none, lines spread over the ink area | 7B VLM (`-O olmocr.model=…`, `-O olmocr.server=…` for a running vLLM); minutes per page on CPU, so opt-in |
 
 All boxes are normalized to `BBox(x, y, w, h)` in 0..1 page fractions.
-
-### Languages
-
-`--lang` takes Tesseract codes. `lang_map.py` translates them for the other engines (`deu` →
-PaddleOCR `german`, EasyOCR `de`, RapidOCR `latin`, …). For compound codes like `eng+deu`,
-non-Tesseract engines use the first language. Most engines have no Fraktur model and read
-blackletter with their German/Latin model. That difference is exactly what the comparison is
-meant to show.
 
 ## Evaluation
 
@@ -163,33 +319,47 @@ time are listed next to it.
 
 ## GitHub Actions
 
-`.github/workflows/ocr.yml` (manual `workflow_dispatch`) downloads a PDF from a URL, runs every CPU
-engine, and uploads each engine's zip as its own artifact (`ocr-tesseract`, `ocr-rapidocr`, …),
-plus `all-results` and `ocr-report`. It also writes a summary table to the run page. Inputs:
-`pdf_url`, `lang`, `engines`, `dpi`, `page_range`, `timeout_per_page`. olmOCR is excluded.
+`.github/workflows/ocr.yml` is started manually (`workflow_dispatch`). Its inputs match the CLI:
 
-`.github/workflows/tests.yml` runs `pytest` and the `html2pdf` tests on every push.
+| Input | Default | Meaning |
+|---|---|---|
+| `pdf_url` | (required) | Public URL of the scanned PDF |
+| `lang` | `eng` | as `--lang` |
+| `engines` | `all` | as `--engines`; `macos_vision` runs in a separate macOS job |
+| `engine_options` | empty | space-separated `ENGINE.KEY=VALUE`, as `-O` |
+| `preprocess` | empty | as `--preprocess` |
+| `dpi` | `300` | as `--dpi` |
+| `page_range` | empty (all) | as `--pages` |
+| `timeout_per_page` | `300` | as `--timeout-per-page` |
 
-## Upstream fixes
+Jobs:
 
-The text layer is only invisible with two fixes that are not released yet:
+1. **validate** installs only the base package and runs `pdf-ocr-bench check`, so bad input fails
+   in about a minute, before any engine is installed. It also computes which Tesseract packages
+   `lang` needs.
+2. **ocr** (Ubuntu) installs those packages and the engines, runs every selected engine except
+   macOS Vision, and uploads each engine's zip as its own artifact (`ocr-tesseract`,
+   `ocr-rapidocr`, …), plus `all-results` and `ocr-report`. It also writes a summary table
+   (engine, model, words, confidence, time, status) to the run page.
+3. **ocr-macos-vision** (macOS runner) runs macOS Vision when `engines` is `all` or names
+   `macos_vision`, and uploads `ocr-macos-vision`. Note that macOS runner minutes are billed at 10×
+   Linux on private repositories.
 
-* [fschutt/printpdf#287](https://github.com/fschutt/printpdf/pull/287): HTML text honours the
-  alpha of its color. `color: transparent` becomes text render mode 3 (invisible but selectable)
-  instead of opaque black.
-* [fschutt/azul#480](https://github.com/fschutt/azul/pull/480): an invalid CSS selector drops its
-  whole rule. Before, `.word::selection { color: #000 }` was applied to every `.word`.
+The page renders in `results/images/` are left out of the artifacts, since they are only OCR input.
+olmOCR is not run in CI.
 
-`html2pdf/Cargo.toml` builds against both PR branches: printpdf as a git dependency, and azul-css
-through `[patch.crates-io]`. `Cargo.lock` pins the exact commits. Once both are released, switch
-back to crates.io versions.
+`.github/workflows/tests.yml` runs `pytest` and the `html2pdf` tests on every push. A macOS job runs
+the macOS Vision engine on `sample.pdf` (`tests/test_macos_vision.py`, which `make test` also runs
+on a Mac).
 
 ## Tests
 
 ```sh
+make test                                   # or:
 pip install -e ".[test]" && pytest
 cd html2pdf && cargo test
 ```
 
 The pipeline tests use fake engines, so they need no OCR models. The Tesseract test is skipped
-when `tesseract` is not installed. `scripts/make_sample_pdf.py` regenerates `sample.pdf`.
+when `tesseract` is not installed, and `tests/test_macos_vision.py` runs only on macOS with
+`.[macos-vision]` installed. `scripts/make_sample_pdf.py` regenerates `sample.pdf`.

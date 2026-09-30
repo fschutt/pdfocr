@@ -7,12 +7,11 @@ from pathlib import Path
 from jinja2 import Template
 
 from ..models import OcrResult, PageImage
-from .renderer import html_name, image_name, render_page_html
+from .renderer import html_name, render_page_html
 
 
 def create_pages_zip(
     ocr_result: OcrResult,
-    image_dir: Path,  # pre-rendered page images
     output_zip: Path,
     page_template: Template,  # Jinja2
     page_width_pt: float,
@@ -21,7 +20,10 @@ def create_pages_zip(
     html_lang: str = "en",
     has_confidence: bool = True,
 ) -> Path:
-    """Bundle HTML pages + their PNG images into a .zip.
+    """Bundle the HTML pages and metadata.json into a .zip.
+
+    The pages hold only the recognized text (no scan), so the zip stays small and the PDF
+    made from it is text only.
 
     `page_width_pt`/`page_height_pt` are the default size; `page_sizes` overrides it per
     page (0-indexed) for PDFs with mixed page sizes.
@@ -35,13 +37,10 @@ def create_pages_zip(
             width_pt, height_pt = page_sizes.get(page.page_num, (page_width_pt, page_height_pt))
             html = render_page_html(page_template, page, width_pt, height_pt, html_lang)
             zf.writestr(html_name(page.page_num), html)
-            # PNGs are already compressed; store them as-is
-            zf.write(image_dir / image_name(page.page_num), image_name(page.page_num), zipfile.ZIP_STORED)
             pages_meta.append(
                 {
                     "page_num": page.page_num,
                     "html": html_name(page.page_num),
-                    "image": image_name(page.page_num),
                     "width_px": page.width_px,
                     "height_px": page.height_px,
                     "width_pt": round(width_pt, 4),
@@ -73,11 +72,10 @@ def create_engine_zip(
     html_lang: str = "en",
     has_confidence: bool = True,
 ) -> Path:
-    """Convenience wrapper: take image dir and page sizes from the rendered images."""
+    """Convenience wrapper: take the page sizes from the rendered page images."""
     first = images[0]
     return create_pages_zip(
         ocr_result,
-        first.path.parent,
         output_zip,
         page_template,
         first.width_pt,

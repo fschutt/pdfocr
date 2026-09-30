@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -101,6 +102,8 @@ class EngineReport(BaseModel):
     name: str
     display_name: str
     success: bool
+    route: str | None = None  # the model chosen for the requested languages
+    options: dict[str, Any] = Field(default_factory=dict)  # effective engine options
     error: str | None = None
     total_words: int = 0
     avg_confidence: float | None = None  # None: the engine reports no confidence
@@ -122,6 +125,7 @@ class Report(BaseModel):
     input_pdf: str
     lang: str
     dpi: int
+    preprocess: list[str] = Field(default_factory=list)
     pages: list[int]  # 1-indexed pages processed
     engines: list[EngineReport]
     cer_matrix: dict[str, dict[str, float]] = Field(default_factory=dict)

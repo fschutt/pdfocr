@@ -15,41 +15,28 @@
     height: {{ '%.2f' % height_pt }}pt;
     overflow: hidden;
   }
-  .page img {
-    position: absolute;
-    top: 0; left: 0;
-    width: 100%;
-    height: 100%;
-  }
   .word {
     position: absolute;
-    color: transparent;      /* invisible by default */
-    font-family: sans-serif;
+    color: #000;
+    font-family: {{ font_family }};
     line-height: 1;
     white-space: pre;
-    /* when selected, text becomes visible via ::selection */
   }
-  .word::selection {
-    color: #000;
-    background: rgba(0, 120, 215, 0.3);
-  }
-  /* debug mode: make all text visible */
+  /* debug mode: outline every word box */
   .page.debug .word {
-    color: rgba(255, 0, 0, 0.5);
-    border: 1px solid rgba(255, 0, 0, 0.2);
+    border: 1px solid #f00;
   }
 </style>
 </head>
 <body>
 <div class="page" id="page-{{ page_num }}">
-  <img src="{{ image_name }}" alt="Page {{ page_num + 1 }}">
   {% for word in words %}
   {% set st = style(word) %}
   <span class="word" style="left: {{ '%.4f' % (word.bbox.x * 100) }}%; top: {{ '%.4f' % (st.top * 100) }}%; width: {{ '%.4f' % (word.bbox.w * 100) }}%; height: {{ '%.4f' % (word.bbox.h * 100) }}%; font-size: {{ '%.2f' % st.font_size_pt }}pt;" data-confidence="{{ '%.3f' % word.confidence }}">{{ word.text | e }}{{ st.suffix }}</span>
   {% endfor %}
 </div>
 <script>
-  // Toggle debug mode: press 'd' to make all OCR text visible
+  // Toggle debug mode: press 'd' to outline the word boxes
   document.addEventListener('keydown', e => {
     if (e.key === 'd') document.querySelector('.page').classList.toggle('debug');
   });

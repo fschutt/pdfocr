@@ -4,21 +4,41 @@ on:
   workflow_dispatch:
     inputs:
       pdf_url:
-        description: 'Public URL to input PDF'
+        description: 'Public URL of the input PDF (a scanned / image-only PDF)'
         required: true
         type: string
       lang:
-        description: 'Document language (ISO 639-3 for Tesseract, mapped for others). Examples: eng, deu, fra, deu_frak (German Fraktur), frk (generic Fraktur), chi_sim, jpn, ara, rus, lat'
+        description: >-
+          Document language(s) as Tesseract codes, main language first, joined with "+".
+          Supported: eng, deu, deu_frak (German Fraktur), frk (Fraktur), fra, spa, ita, por, nld,
+          pol, lat, rus, ukr, ara, chi_sim, chi_tra, jpn, kor. Example: deu+eng
         required: false
         default: 'eng'
         type: string
       engines:
-        description: 'Engines to run (comma-separated, or "all"). Available: tesseract, rapidocr, paddleocr, easyocr, doctr, surya, ocrmypdf, ocrmypdf_rapid'
+        description: >-
+          "all", or a comma-separated list of: tesseract, rapidocr, paddleocr, easyocr, doctr,
+          surya, ocrmypdf, ocrmypdf_rapid, macos_vision (runs on a macOS runner).
+          Named engines that cannot read the language are rejected; with "all" they are skipped.
         required: false
         default: 'all'
         type: string
+      engine_options:
+        description: >-
+          Engine parameters, space-separated ENGINE.KEY=VALUE (empty = defaults), e.g.
+          "tesseract.psm=6 macos_vision.level=fast". `pdf-ocr-bench engines` lists them all.
+        required: false
+        default: ''
+        type: string
+      preprocess:
+        description: >-
+          Image filters applied in order before OCR, comma-separated (empty = none): grayscale,
+          autocontrast, denoise, sharpen, binarize, deskew. Example: grayscale,deskew,denoise
+        required: false
+        default: ''
+        type: string
       dpi:
-        description: 'Render DPI for page images (150=fast/draft, 300=default, 600=high quality)'
+        description: 'Render DPI of the page images the engines read (150 = fast/draft, 300 = default, 600 = small print)'
         required: false
         default: '300'
         type: string
@@ -28,7 +48,7 @@ on:
         default: ''
         type: string
       timeout_per_page:
-        description: 'Max seconds per page per engine before skipping (0 = no limit)'
+        description: 'Max seconds per page per engine before the page is skipped (0 = no limit)'
         required: false
         default: '300'
         type: string
@@ -39,6 +59,8 @@ env:
   PDF_URL: ${{ inputs.pdf_url }}
   OCR_LANG: ${{ inputs.lang }}
   OCR_ENGINES: ${{ inputs.engines }}
+  OCR_PREPROCESS: ${{ inputs.preprocess }}
+  OCR_ENGINE_OPTIONS: ${{ inputs.engine_options }}
   OCR_DPI: ${{ inputs.dpi }}
   OCR_PAGES: ${{ inputs.page_range }}
   OCR_TIMEOUT: ${{ inputs.timeout_per_page }}
@@ -46,9 +68,61 @@ env:
   PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK: 'True'
 
 jobs:
+  # Reject bad input in about a minute, before any engine is installed.
+  validate:
+    runs-on: ubuntu-latest
+    outputs:
+      linux_engines: ${{ steps.split.outputs.linux_engines }}
+      run_linux: ${{ steps.split.outputs.run_linux }}
+      run_macos: ${{ steps.split.outputs.run_macos }}
+      tesseract_packages: ${{ steps.split.outputs.tesseract_packages }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -e .
+      - name: Validate inputs and show the engine routing
+        run: |
+          [[ "$OCR_DPI" =~ ^[0-9]+$ ]] || { echo "::error::dpi must be a number, got '$OCR_DPI'"; exit 1; }
+          [[ "$OCR_TIMEOUT" =~ ^[0-9]+$ ]] || { echo "::error::timeout_per_page must be a number, got '$OCR_TIMEOUT'"; exit 1; }
+          args=(--lang "$OCR_LANG" --engines "$OCR_ENGINES" --preprocess "$OCR_PREPROCESS")
+          [ -n "$OCR_PAGES" ] && args+=(--pages "$OCR_PAGES")
+          read -ra opts <<< "$OCR_ENGINE_OPTIONS"
+          for o in "${opts[@]}"; do args+=(-O "$o"); done
+          if ! out=$(pdf-ocr-bench check "${args[@]}" 2>&1); then
+            echo "$out"
+            echo "::error::$(echo "$out" | tail -1)"
+            exit 1
+          fi
+          echo "$out"
+      - name: Split engines between the Linux and macOS jobs
+        id: split
+        run: |
+          engines=$(echo "$OCR_ENGINES" | tr 'A-Z-' 'a-z_' | tr -d ' ')
+          if [ "$engines" = "all" ]; then
+            linux=all; macos=true
+          else
+            linux=$(echo "$engines" | tr ',' '\n' | grep -vx 'macos_vision' | paste -sd, - || true)
+            macos=$(echo ",$engines," | grep -q ',macos_vision,' && echo true || echo false)
+          fi
+          {
+            echo "linux_engines=$linux"
+            echo "run_linux=$([ -n "$linux" ] && echo true || echo false)"
+            echo "run_macos=$macos"
+            echo "tesseract_packages=$(pdf-ocr-bench tesseract-packages --lang "$OCR_LANG" | paste -sd' ' -)"
+          } >> "$GITHUB_OUTPUT"
+          cat "$GITHUB_OUTPUT"
+
   ocr:
+    needs: validate
+    if: needs.validate.outputs.run_linux == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    env:
+      LINUX_ENGINES: ${{ needs.validate.outputs.linux_engines }}
+      TESSERACT_PACKAGES: ${{ needs.validate.outputs.tesseract_packages }}
     steps:
       - uses: actions/checkout@v4
 
@@ -57,40 +131,19 @@ jobs:
           python-version: '3.12'
           cache: pip
 
-      - name: Validate inputs
-        run: |
-          [[ "$OCR_LANG" =~ ^[A-Za-z_+]+$ ]] || { echo "::error::invalid lang '$OCR_LANG'"; exit 1; }
-          [[ "$OCR_ENGINES" =~ ^[a-z_,\ -]+$ ]] || { echo "::error::invalid engines '$OCR_ENGINES'"; exit 1; }
-          [[ "$OCR_DPI" =~ ^[0-9]+$ ]] || { echo "::error::invalid dpi '$OCR_DPI'"; exit 1; }
-          [[ -z "$OCR_PAGES" || "$OCR_PAGES" =~ ^[0-9,\ -]+$ ]] || { echo "::error::invalid page_range '$OCR_PAGES'"; exit 1; }
-          [[ "$OCR_TIMEOUT" =~ ^[0-9]+$ ]] || { echo "::error::invalid timeout '$OCR_TIMEOUT'"; exit 1; }
-
-      - name: Install system deps + Tesseract language packs
+      - name: Install system deps + the Tesseract models for --lang
         run: |
           sudo apt-get update -qq
+          # shellcheck disable=SC2086 # word splitting of the package list is intended
           sudo apt-get install -y --no-install-recommends \
-            tesseract-ocr tesseract-ocr-eng ghostscript poppler-utils libgl1 \
+            tesseract-ocr ghostscript poppler-utils libgl1 \
             libglib2.0-0 libsm6 libxext6 libxrender1 \
-            qpdf unpaper pngquant
-
-          # Handles compound langs like "eng+deu". Package names use '-' where Tesseract
-          # codes use '_' (chi_sim -> tesseract-ocr-chi-sim). Current tessdata has no
-          # deu_frak model: fall back to frk (German Fraktur) + the Fraktur script model;
-          # the Tesseract engine picks whichever is installed.
-          for lang_code in $(echo "$OCR_LANG" | tr '+' '\n'); do
-            pkg="tesseract-ocr-${lang_code//_/-}"
-            echo "Installing $pkg ..."
-            if sudo apt-get install -y --no-install-recommends "$pkg"; then continue; fi
-            case "$lang_code" in
-              deu_frak|frk) sudo apt-get install -y --no-install-recommends tesseract-ocr-frk tesseract-ocr-script-frak tesseract-ocr-deu || true ;;
-            esac
-            echo "::warning::Could not install $pkg — Tesseract may fall back to another model for '$lang_code'"
-          done
-          echo "Installed Tesseract languages:"
+            qpdf unpaper pngquant $TESSERACT_PACKAGES
+          echo "Installed Tesseract models:"
           tesseract --list-langs
 
       - name: Install llama.cpp (CPU backend for Surya 2)
-        if: contains(inputs.engines, 'surya') || inputs.engines == 'all'
+        if: contains(env.LINUX_ENGINES, 'surya') || env.LINUX_ENGINES == 'all'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -102,11 +155,11 @@ jobs:
             echo "LD_LIBRARY_PATH=$bin_dir:${LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
             "$bin_dir/llama-server" --version || true
           else
-            echo "::warning::Could not download llama.cpp — Surya will be skipped"
+            echo "::warning::Could not download llama.cpp; Surya will be skipped"
           fi
 
       - name: Install Python deps
-        # [ci] = all engines minus olmocr
+        # [ci] = all engines minus olmocr (macos-vision is macOS-only and a no-op here)
         run: |
           pip install --upgrade pip
           pip install -e ".[ci]"
@@ -114,8 +167,10 @@ jobs:
       - name: Pre-download models
         run: |
           echo "::group::Model downloads (lang=$OCR_LANG)"
-          # surya's GGUF is fetched on first use by its own server; skip the spawn here
-          pdf-ocr-bench warmup --lang "$OCR_LANG" --engines tesseract,rapidocr,paddleocr,easyocr,doctr,ocrmypdf_rapid
+          args=(--lang "$OCR_LANG" --engines "$LINUX_ENGINES")
+          read -ra opts <<< "$OCR_ENGINE_OPTIONS"
+          for o in "${opts[@]}"; do [[ "$o" == macos_vision.* || "$o" == macos-vision.* ]] || args+=(-O "$o"); done
+          pdf-ocr-bench warmup "${args[@]}"
           echo "::endgroup::"
 
       - name: Download input PDF
@@ -126,9 +181,12 @@ jobs:
 
       - name: Run OCR pipeline
         run: |
-          args=(input.pdf -o results --engines "$OCR_ENGINES" --lang "$OCR_LANG" --dpi "$OCR_DPI"
-                --timeout-per-page "$OCR_TIMEOUT" --report results/report.json -v)
+          args=(input.pdf -o results --engines "$LINUX_ENGINES" --lang "$OCR_LANG" --dpi "$OCR_DPI"
+                --preprocess "$OCR_PREPROCESS" --timeout-per-page "$OCR_TIMEOUT" --report results/report.json -v)
           [ -n "$OCR_PAGES" ] && args+=(--pages "$OCR_PAGES")
+          # macOS Vision options belong to the macOS job
+          read -ra opts <<< "$OCR_ENGINE_OPTIONS"
+          for o in "${opts[@]}"; do [[ "$o" == macos_vision.* || "$o" == macos-vision.* ]] || args+=(-O "$o"); done
           echo "Running: pdf-ocr-bench run ${args[*]}"
           set -o pipefail
           pdf-ocr-bench run "${args[@]}" 2>&1 | tee ocr.log
@@ -138,7 +196,10 @@ jobs:
         if: always()
         with:
           name: all-results
-          path: results/
+          # the page renders are only OCR input; the zips and the report are the results
+          path: |
+            results/
+            !results/images/
           retention-days: 30
 
       - name: List engine zips
@@ -219,20 +280,50 @@ jobs:
       - name: Summary
         if: always()
         run: |
-          echo "## OCR Results" >> "$GITHUB_STEP_SUMMARY"
+          echo "## OCR Results (Linux)" >> "$GITHUB_STEP_SUMMARY"
           [ -f results/report.json ] || exit 0
-          python3 - >> "$GITHUB_STEP_SUMMARY" <<'EOF'
-          import json
-          r = json.load(open('results/report.json'))
-          fmt = lambda v, spec: '-' if v is None else format(v, spec)
-          print('| Engine | Words | Avg Conf | Time (s) | Status |')
-          print('|--------|-------|----------|----------|--------|')
-          for e in r.get('engines', []):
-              status = '✅' if e.get('success') else f"❌ {(e.get('error') or '')[:80]}"
-              print(f"| {e['display_name']} | {e.get('total_words', '-')} | {fmt(e.get('avg_confidence'), '.3f')} | {fmt(e.get('elapsed'), '.1f')} | {status} |")
-          print()
-          if r.get('ranking'):
-              print('### Ranking (by consensus agreement)')
-              for i, eng in enumerate(r['ranking'], 1):
-                  print(f"{i}. **{eng['name']}** — avg CER {eng['avg_cer']:.4f}, bbox IoU {eng['avg_bbox_iou']:.3f}")
-          EOF
+          python3 scripts/report_summary.py results/report.json >> "$GITHUB_STEP_SUMMARY"
+
+  ocr-macos-vision:
+    needs: validate
+    if: needs.validate.outputs.run_macos == 'true'
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -e ".[macos-vision]"
+      - name: Download input PDF
+        run: curl -fSL --max-filesize 500000000 -o input.pdf "$PDF_URL"
+      - name: Run macOS Vision
+        run: |
+          args=(input.pdf -o results --engines macos_vision --lang "$OCR_LANG" --dpi "$OCR_DPI"
+                --preprocess "$OCR_PREPROCESS" --timeout-per-page "$OCR_TIMEOUT" --report results/report.json -v)
+          [ -n "$OCR_PAGES" ] && args+=(--pages "$OCR_PAGES")
+          read -ra opts <<< "$OCR_ENGINE_OPTIONS"
+          for o in "${opts[@]}"; do [[ "$o" == macos_vision.* || "$o" == macos-vision.* ]] && args+=(-O "$o"); done
+          set -o pipefail
+          pdf-ocr-bench run "${args[@]}" 2>&1 | tee ocr-macos-vision.log
+      - name: Upload macos_vision
+        uses: actions/upload-artifact@v4
+        if: always() && hashFiles('results/macos_vision/pages.zip') != ''
+        with:
+          name: ocr-macos-vision
+          path: results/macos_vision/pages.zip
+      - name: Upload report & logs
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ocr-report-macos-vision
+          path: |
+            results/report.json
+            ocr-macos-vision.log
+      - name: Summary
+        if: always()
+        run: |
+          echo "## OCR Results (macOS Vision)" >> "$GITHUB_STEP_SUMMARY"
+          [ -f results/report.json ] || exit 0
+          python3 scripts/report_summary.py results/report.json >> "$GITHUB_STEP_SUMMARY"

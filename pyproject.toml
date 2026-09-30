@@ -34,6 +34,8 @@ surya = ["surya-ocr"]
 ocrmypdf = ["ocrmypdf"]
 ocrmypdf-rapid = ["ocrmypdf", "ocrmypdf-rapidocr"]
 olmocr = ["olmocr"]
+# Apple Vision (Live Text's recognizer), macOS only
+macos-vision = ["pyobjc-framework-Vision>=10; sys_platform == 'darwin'"]
 # CI = everything except olmOCR (needs GPU / huge model)
 ci = [
     "pdf-ocr-bench[tesseract]",
@@ -44,9 +46,10 @@ ci = [
     "pdf-ocr-bench[surya]",
     "pdf-ocr-bench[ocrmypdf]",
     "pdf-ocr-bench[ocrmypdf-rapid]",
+    "pdf-ocr-bench[macos-vision]",
 ]
 all = ["pdf-ocr-bench[ci]", "pdf-ocr-bench[olmocr]"]
-test = ["pytest", "pytesseract"]
+test = ["pytest", "pytesseract", "pyyaml"]
 
 [project.scripts]
 pdf-ocr-bench = "pdf_ocr_bench.cli:main"

@@ -17,6 +17,39 @@ jobs:
       - run: pip install -e ".[test]"
       - run: pytest -v
 
+  # Apple Vision (Live Text's recognizer) only exists on macOS; GitHub's macOS runners have it.
+  macos-vision:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -e ".[test,macos-vision]"
+      - run: pdf-ocr-bench check --lang deu+eng --engines macos_vision --installed
+      - run: pytest -v tests/test_macos_vision.py
+      - name: Run the pipeline with macOS Vision
+        run: |
+          pdf-ocr-bench run sample.pdf --lang deu+eng --engines macos_vision -o results -v
+          python - <<'EOF'
+          import json, zipfile
+          report = json.load(open("results/report.json"))
+          (engine,) = report["engines"]
+          assert engine["success"], engine
+          assert engine["total_words"] > 150, engine
+          html = zipfile.ZipFile("results/macos_vision/pages.zip").read("page_002.html").decode()
+          assert "Größere" in html and "Bestände" in html, html[:2000]
+          print(f"macOS Vision: {engine['total_words']} words, {engine['elapsed']:.1f}s, avg conf {engine['avg_confidence']}")
+          EOF
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: macos-vision-sample
+          path: |
+            results/report.json
+            results/macos_vision/pages.zip
+
   html2pdf:
     runs-on: ubuntu-latest
     defaults:

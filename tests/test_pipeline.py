@@ -9,15 +9,16 @@ from pathlib import Path
 import pymupdf
 import pytest
 
-from pdf_ocr_bench import pipeline
-from pdf_ocr_bench.engines import ENGINES, OcrEngine, select_engines
+from pdf_ocr_bench import pipeline, plan
+from pdf_ocr_bench.engines import ENGINES, OcrEngine, Route, select_engines
 from pdf_ocr_bench.engines.base import split_block, split_line, words_to_text
-from pdf_ocr_bench.engines.paddleocr_engine import merge_fragments
+from pdf_ocr_bench.engines.paddleocr_engine import line_words
 from pdf_ocr_bench.evaluation import metrics
-from pdf_ocr_bench.html_output.renderer import load_template, render_page_html, word_styles
-from pdf_ocr_bench.lang_map import get_lang, html_lang
+from pdf_ocr_bench.html_output.layout import text_width_em, word_styles
+from pdf_ocr_bench.html_output.renderer import load_template, render_page_html
 from pdf_ocr_bench.models import BBox, OcrWord, PageImage, PageResult
 from pdf_ocr_bench.pipeline import PipelineConfig, parse_page_range
+from pdf_ocr_bench.plan import InputError
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -67,17 +68,6 @@ def test_parse_page_range_rejects(spec):
         parse_page_range(spec, 4)
 
 
-def test_lang_mapping():
-    assert get_lang("deu", "paddleocr") == "german"
-    assert get_lang("deu_frak", "easyocr") == "de"
-    assert get_lang("eng+deu", "surya") == "en"
-    assert get_lang("chi_sim", "rapidocr") == "ch"
-    assert get_lang("xyz", "doctr") == "en"
-    assert get_lang("deu_frak+eng", "tesseract") == "deu_frak+eng"
-    assert get_lang("frk", "ocrmypdf_rapid") == "deu"
-    assert html_lang("chi_tra") == "zh-Hant"
-
-
 def test_bbox_normalization():
     b = BBox.from_points([[100, 50], [300, 50], [300, 90], [100, 90]], 1000, 500)
     assert (b.x, b.y, b.w, b.h) == pytest.approx((0.1, 0.1, 0.2, 0.08))
@@ -100,12 +90,19 @@ def test_split_block_stacks_lines():
     assert words[2].bbox.y == pytest.approx(0.1)
 
 
-def test_merge_paddle_fragments():
-    frags = ["Gr", "üß", "e", " ", "w", "ö", "rld", ", ", "OCR", "."]
-    regions = [[(i, 0), (i + 1, 1)] for i in range(len(frags))]
-    merged = merge_fragments(frags, regions)
-    assert [t for t, _ in merged] == ["Grüße", "wörld,", "OCR."]
-    assert merged[0][1] == [(0, 0), (1, 1), (1, 0), (2, 1), (2, 0), (3, 1)]
+def test_paddle_line_words_follow_the_line_text():
+    # PaddleOCR fragments split at character-class changes and may hold spaces (", Ü")
+    text = "Grüße wörld, Übergröße."
+    frags = ["Gr", "üß", "e ", "w", "ö", "rld", ", Ü", "bergr", "öß", "e", "."]
+    regions, x = [], 0
+    for frag in frags:
+        regions.append([(x, 0), (x + 10 * len(frag), 0), (x + 10 * len(frag), 20), (x, 20)])
+        x += 10 * len(frag)
+    words = line_words(text, frags, regions)
+    assert [w for w, _ in words] == ["Grüße", "wörld,", "Übergröße."]
+    # one character = 10 px: "Grüße" spans x 0..50, "wörld," 60..120, "Übergröße." 130..230
+    assert [box[0] for _, box in words] == [0, 60, 130] and [box[2] for _, box in words] == [50, 120, 230]
+    assert line_words("something else", frags, regions) is None  # fragments do not spell the text
 
 
 def test_words_to_text_orders_lines_and_words():
@@ -129,7 +126,7 @@ def test_metrics():
 
 def test_select_engines():
     all_cpu = [c.name for c in select_engines("all")]
-    assert "olmocr" not in all_cpu and "tesseract" in all_cpu and len(all_cpu) == 8
+    assert "olmocr" not in all_cpu and "tesseract" in all_cpu and "macos_vision" in all_cpu and len(all_cpu) == 9
     assert "olmocr" in [c.name for c in select_engines("all", include_gpu=True)]
     assert [c.name for c in select_engines("rapidocr, tesseract,rapidocr")] == ["rapidocr", "tesseract"]
     assert [c.name for c in select_engines("ocrmypdf-rapid")] == ["ocrmypdf_rapid"]
@@ -150,26 +147,62 @@ def _page(words: list[OcrWord]) -> PageResult:
 def test_page_html():
     html = render_page_html(load_template(), _page([word("a<b&c", 0.1, 0.2), word("ß", 0.3, 0.2)]), 595.28, 841.89, "de")
     assert '<html lang="de">' in html
-    assert '<img src="page_001.png"' in html
+    assert "<img" not in html  # text only: the scan never goes into the page
     assert "width: 595.28pt" in html and "height: 841.89pt" in html
     assert 'name="pdf.options.pageWidth" content="210.0016"' in html
     assert "a&lt;b&amp;c </span>" in html  # escaped, with the inter-word space
     assert ">ß</span>" in html  # last word of the line: no trailing space
     assert "left: 10.0000%" in html
     style = html[html.index("<style>") : html.index("</style>")]
-    assert "color: transparent" in style and ".word::selection" in style and ".page.debug .word" in style
+    assert "color: #000;" in style and "transparent" not in style
 
 
-def test_word_styles_share_line_size_and_fit_width():
-    tall = word("Äg", 0.1, 0.1, w=0.02, h=0.03)
-    short = word("a", 0.2, 0.105, w=0.2, h=0.02)
-    long = word("x" * 40, 0.1, 0.5, w=0.1, h=0.03)
-    styles = word_styles([tall, short, long], 600, 800)
-    # same line -> height-derived size of the tallest box (0.03 * 800 * 0.8), unless width-capped
-    assert styles[id(short)].font_size_pt == pytest.approx(19.2)
-    assert styles[id(tall)].font_size_pt == pytest.approx(0.02 * 600 / (0.6 * 2))  # 2 glyphs in 12pt
-    assert styles[id(long)].font_size_pt == pytest.approx(0.1 * 600 / (0.6 * 40))
-    assert styles[id(tall)].suffix == " " and styles[id(short)].suffix == "" and styles[id(long)].suffix == ""
+def test_text_width_uses_helvetica_metrics():
+    assert text_width_em("Hallo") == pytest.approx(0.722 + 0.556 + 0.222 + 0.222 + 0.556, abs=1e-3)
+    assert text_width_em("Grüße") == pytest.approx(0.778 + 0.333 + 0.556 + 0.611 + 0.556, abs=1e-3)
+    assert text_width_em("u\u0308") == text_width_em("ü")  # decomposed umlaut measured as one glyph
+    assert text_width_em("漢字") == pytest.approx(2.0)  # no Helvetica glyph: wide fallback
+
+
+def _boxed(text: str, x: float, y: float, size_pt: float, page_w: float = 600, h: float = 0.02) -> OcrWord:
+    """A word whose box is exactly as wide as `text` set at `size_pt`."""
+    return word(text, x, y, w=text_width_em(text) * size_pt / page_w, h=h)
+
+
+def test_word_styles_one_size_per_line():
+    a, b, c = _boxed("Hello", 0.1, 0.1, 12), _boxed("big", 0.3, 0.1, 12), _boxed("world", 0.5, 0.1, 12)
+    styles = word_styles([a, b, c], 600, 800)
+    assert [styles[id(w)].font_size_pt for w in (a, b, c)] == pytest.approx([12, 12, 12])
+    assert [styles[id(w)].suffix for w in (a, b, c)] == [" ", " ", ""]
+    # one badly boxed word does not resize the line (median)
+    a2, b2, c2 = _boxed("Hello", 0.1, 0.1, 12), _boxed("big", 0.3, 0.1, 30), _boxed("world", 0.5, 0.1, 12)
+    styles = word_styles([a2, b2, c2], 600, 800)
+    assert styles[id(a2)].font_size_pt == pytest.approx(12) and styles[id(b2)].font_size_pt == pytest.approx(12)
+
+
+def test_word_styles_squeeze_only_before_a_neighbour():
+    first = _boxed("Danach", 0.1, 0.1, 12)
+    # the next word starts right where "Danach" ends: no room for the space at 12pt
+    nxt = _boxed("vergleichen", first.bbox.x1, 0.1, 12)
+    styles = word_styles([first, nxt], 600, 800)
+    room_pt = (nxt.bbox.x - first.bbox.x) * 600
+    assert styles[id(first)].font_size_pt == pytest.approx(room_pt / text_width_em("Danach "))
+    assert styles[id(nxt)].font_size_pt == pytest.approx(12)  # last word: only the page edge limits it
+    # squeezing never goes below half the line size
+    crowded = [word("Danach", 0.1, 0.1, w=0.1), word("x", 0.101, 0.1, w=0.1), word("y", 0.3, 0.1, w=0.1)]
+    styles = word_styles(crowded, 600, 800)
+    line = max(styles[id(w)].font_size_pt for w in crowded)
+    assert styles[id(crowded[0])].font_size_pt == pytest.approx(line / 2)
+
+
+def test_word_styles_height_guard_and_vertical_center():
+    wide = word("i", 0.1, 0.1, w=0.5, h=0.01)  # box far wider than one "i": width fit is huge
+    styles = word_styles([wide], 600, 800)
+    assert styles[id(wide)].font_size_pt == pytest.approx(1.5 * 0.01 * 800)
+    w = _boxed("Hello", 0.1, 0.5, 12)
+    st = word_styles([w], 600, 800)[id(w)]
+    center_pt = (w.bbox.y + w.bbox.h / 2) * 800
+    assert st.top * 800 + (0.770 - 0.718 / 2) * st.font_size_pt == pytest.approx(center_pt)
 
 
 # --- pipeline with fake engines --------------------------------------------------
@@ -222,8 +255,8 @@ class CrashEngine(FakeEngine):
         raise RuntimeError("boom")
 
 
-def _run(monkeypatch, tmp_path, pdf, engines, **kw):
-    monkeypatch.setattr(pipeline, "select_engines", lambda spec, include_gpu=False: engines)
+def _run(monkeypatch, tmp_path, pdf, engine_classes, **kw):
+    monkeypatch.setattr(plan, "select_engines", lambda spec, include_gpu=False: engine_classes)
     cfg = PipelineConfig(input_pdf=pdf, output_dir=tmp_path / "results", dpi=72, **kw)
     return pipeline.run(cfg), tmp_path / "results"
 
@@ -233,9 +266,8 @@ def test_pipeline_end_to_end(monkeypatch, tmp_path, pdf):
 
     assert sorted(p.name for p in (out / "images").iterdir()) == ["page_001.png", "page_002.png"]
     with zipfile.ZipFile(out / "fake_a" / "pages.zip") as zf:
-        assert sorted(zf.namelist()) == [
-            "metadata.json", "page_001.html", "page_001.png", "page_002.html", "page_002.png",
-        ]  # fmt: skip
+        # the shared page images stay in results/images; zips hold only text
+        assert sorted(zf.namelist()) == ["metadata.json", "page_001.html", "page_002.html"]
         meta = json.loads(zf.read("metadata.json"))
         assert meta["engine"] == "fake_a" and meta["page_count"] == 2 and meta["total_words"] == 6
         assert meta["avg_confidence"] == pytest.approx(0.8)
@@ -272,6 +304,65 @@ def test_page_selection(monkeypatch, tmp_path, pdf):
     assert report.pages == [2]
     with zipfile.ZipFile(out / "fake_a" / "pages.zip") as zf:
         assert "page_002.html" in zf.namelist() and "page_001.html" not in zf.namelist()
+
+
+class LatinOnlyEngine(FakeEngine):
+    name = "latin_only"
+    display_name = "LatinOnly"
+
+    @classmethod
+    def route(cls, languages):
+        other = [lang.code for lang in languages if lang.script != "Latin"]
+        return Route(unsupported=f"no model for {', '.join(other)}") if other else Route(lang="latin", detail="latin")
+
+
+class JoinedWordsEngine(FakeEngine):
+    name = "joined"
+    display_name = "Joined"
+
+    def ocr_page(self, image, lang):
+        return [word("Hello world", 0.1, 0.4, w=0.4)]
+
+
+def test_engine_that_cannot_read_the_language(monkeypatch, tmp_path, pdf):
+    # --engines all: skipped, and the report says why
+    report, out = _run(monkeypatch, tmp_path, pdf, [FakeEngine, LatinOnlyEngine], lang="chi_sim")
+    by_name = {e.name: e for e in report.engines}
+    assert by_name["fake_a"].success
+    assert not by_name["latin_only"].success and by_name["latin_only"].error == "skipped: no model for chi_sim"
+    assert not (out / "latin_only").exists()
+    # asked for by name: rejected before anything is rendered
+    with pytest.raises(InputError, match="latin_only: no model for chi_sim"):
+        _run(monkeypatch, tmp_path / "x", pdf, [FakeEngine, LatinOnlyEngine], lang="chi_sim", engines="fake_a,latin_only")
+    assert not (tmp_path / "x" / "results" / "images").exists()
+
+
+def test_bad_input_is_rejected_before_rendering(monkeypatch, tmp_path, pdf):
+    for kw, message in [
+        ({"lang": "deu+xyz"}, "unknown language code"),
+        ({"preprocess": "grayscale,blur"}, "unknown filter"),
+        ({"pages": "1-x"}, "invalid page range"),
+        ({"pages": "9"}, "selects no pages"),
+    ]:
+        with pytest.raises(InputError, match=message):
+            _run(monkeypatch, tmp_path, pdf, [FakeEngine], **kw)
+    assert not (tmp_path / "results" / "images").exists()
+
+
+def test_words_never_contain_whitespace(monkeypatch, tmp_path, pdf):
+    report, out = _run(monkeypatch, tmp_path, pdf, [JoinedWordsEngine])
+    assert report.engines[0].total_words == 4  # 2 pages x "Hello", "world"
+    html = zipfile.ZipFile(out / "joined" / "pages.zip").read("page_001.html").decode()
+    assert ">Hello </span>" in html and ">world</span>" in html
+
+
+def test_preprocessing_runs_before_the_engines(monkeypatch, tmp_path, pdf):
+    from PIL import Image
+
+    report, out = _run(monkeypatch, tmp_path, pdf, [FakeEngine], preprocess="grayscale,binarize")
+    assert report.preprocess == ["grayscale", "binarize"]
+    with Image.open(out / "images" / "page_001.png") as img:
+        assert img.mode == "L" and set(img.getdata()) <= {0, 255}
 
 
 # --- real engine (only if Tesseract is installed) --------------------------------

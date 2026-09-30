@@ -2,26 +2,17 @@
 name = "html2pdf"
 version = "0.1.0"
 edition = "2021"
-description = "Convert a pdf-ocr-bench pages.zip (positioned HTML + page images) into a searchable PDF"
+description = "Convert a pdf-ocr-bench pages.zip (positioned HTML) into a small, searchable text-only PDF"
 license = "MIT"
 publish = false
 
 [dependencies]
-# Unreleased upstream fixes the text layer depends on (see ../README.md, "Upstream fixes"):
-# printpdf must honour `color: transparent`, azul-css must drop invalid rules like
-# `.word::selection` instead of applying them to `.word`. Switch both back to crates.io
-# releases once they are published.
-printpdf = { git = "https://github.com/fschutt/printpdf", branch = "claude/nice-bardeen-hjit6y", features = ["html", "png", "jpeg"] }
+printpdf = "0.12.8"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
-
-# Only azul-css carries the fix. azul-core/-layout stay on the 0.0.16 release printpdf pins:
-# azul master's azul-layout does not build with printpdf's feature set (agg_rust unlinked).
-[patch.crates-io]
-azul-css = { git = "https://github.com/fschutt/azul", branch = "claude/nice-bardeen-hjit6y" }
 
 [profile.release]
 opt-level = 3

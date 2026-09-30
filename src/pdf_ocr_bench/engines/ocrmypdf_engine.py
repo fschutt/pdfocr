@@ -6,8 +6,10 @@ import sys
 import tempfile
 from pathlib import Path
 
+from ..languages import Language
 from ..models import BBox, OcrWord, PageImage
-from .base import OcrEngine, PageTimeout
+from .base import OcrEngine, PageTimeout, Route
+from .tesseract import PSM, tesseract_preflight, tesseract_route
 
 
 class OcrmypdfEngine(OcrEngine):
@@ -21,12 +23,27 @@ class OcrmypdfEngine(OcrEngine):
     display_name = "ocrmypdf"
     handles_timeout = True
     reports_confidence = False
-    plugin_args: tuple[str, ...] = ()
+    model = "ocrmypdf with Tesseract; the PDF text layer is read back with PyMuPDF"
+    options = {"psm": PSM}
+
+    @classmethod
+    def route(cls, languages: list[Language]) -> Route:
+        return tesseract_route(languages)
+
+    @classmethod
+    def preflight(cls, route: Route) -> Route:
+        return tesseract_preflight(route)
 
     def prepare(self) -> None:
         import ocrmypdf  # noqa: F401 - fail early if missing
 
         self._tmp = Path(tempfile.mkdtemp(prefix=f"{self.name}_"))
+
+    def plugin_args(self) -> list[str]:
+        return ["--tesseract-pagesegmode", str(self.opts["psm"])]
+
+    def ocr_language(self) -> str:
+        return self.lang
 
     def close(self) -> None:
         tmp = getattr(self, "_tmp", None)
@@ -38,18 +55,18 @@ class OcrmypdfEngine(OcrEngine):
         src = self._tmp / f"in_{image.page_num:04d}.pdf"
         dst = self._tmp / f"out_{image.page_num:04d}.pdf"
         image_to_pdf(image, src)
-        self._run(src, dst, image.dpi, lang)
+        self._run(src, dst, image.dpi)
         return pdf_words(dst)
 
-    def _run(self, src: Path, dst: Path, dpi: int, lang: str) -> None:
+    def _run(self, src: Path, dst: Path, dpi: int) -> None:
         cmd = [
             sys.executable, "-m", "ocrmypdf",
-            *self.plugin_args,
+            *self.plugin_args(),
             "--force-ocr",
             "--output-type", "pdf",
             "--optimize", "0",
             "--image-dpi", str(dpi),
-            "-l", lang,
+            "-l", self.ocr_language(),
             str(src), str(dst),
         ]  # fmt: skip
         self.log.debug(" ".join(cmd))

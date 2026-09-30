@@ -3,8 +3,9 @@ from __future__ import annotations
 import html
 import re
 
+from ..languages import Language
 from ..models import BBox, OcrWord, PageImage
-from .base import OcrEngine, split_block
+from .base import OcrEngine, Route, split_block
 
 _LINE_BREAK = re.compile(r"<br\s*/?>|</(?:p|div|li|tr|h[1-6])>", re.I)
 _TAG = re.compile(r"<[^>]+>")
@@ -19,6 +20,11 @@ class SuryaEngine(OcrEngine):
 
     name = "surya"
     display_name = "Surya"
+    model = "Surya 2 VLM (datalab-to/surya-ocr-2), served by llama.cpp (CPU) or vLLM (GPU)"
+
+    @classmethod
+    def route(cls, languages: list[Language]) -> Route:
+        return Route(detail="automatic (VLM)")
 
     def prepare(self) -> None:
         from surya.inference import SuryaInferenceManager
