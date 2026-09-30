@@ -7,6 +7,3 @@ results/
 !sample.pdf
 
 html2pdf/target/
-# local-only [patch.crates-io] for building against patched printpdf/azul-css (see patches/README.md)
-html2pdf/.cargo/
-html2pdf/Cargo.lock

@@ -28,10 +28,15 @@ To check alignment, open a page in a browser and press `d`. That adds the `debug
 `.page.debug .word` rule shows the text in red. printpdf renders the same rule if the HTML carries
 `class="page debug"`.
 
-## printpdf requirement
+## Upstream fixes
 
-The text is only invisible with two upstream fixes, both in [`../patches`](../patches/):
-- printpdf must honour the alpha of `color: transparent`;
-- azul-css must drop invalid rules such as `.word::selection` instead of applying them to `.word`.
+Invisible text relies on two unreleased fixes:
+- [fschutt/printpdf#287](https://github.com/fschutt/printpdf/pull/287): `color: transparent`
+  becomes invisible text instead of black.
+- [fschutt/azul#480](https://github.com/fschutt/azul/pull/480): `.word::selection` no longer
+  applies to `.word`.
 
-With the released printpdf 0.12.8, the text layer renders as black text over the scan.
+`Cargo.toml` builds against both PR branches: printpdf as a git dependency, and azul-css through
+`[patch.crates-io]`. `Cargo.lock` pins the exact commits. azul-core and azul-layout stay on the
+0.0.16 release, because azul master's azul-layout does not build with printpdf's feature set.
+When both fixes are released, go back to the crates.io versions.

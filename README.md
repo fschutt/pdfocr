@@ -170,12 +170,19 @@ plus `all-results` and `ocr-report`. It also writes a summary table to the run p
 
 `.github/workflows/tests.yml` runs `pytest` and the `html2pdf` tests on every push.
 
-## Upstream patches
+## Upstream fixes
 
-The text layer is only invisible with two upstream fixes: printpdf must honour the alpha of
-`color: transparent`, and azul-css must drop invalid CSS rules instead of widening their
-selectors. The `git am`-ready patches, what they fix, and the release order are in
-[`patches/`](patches/).
+The text layer is only invisible with two fixes that are not released yet:
+
+* [fschutt/printpdf#287](https://github.com/fschutt/printpdf/pull/287): HTML text honours the
+  alpha of its color. `color: transparent` becomes text render mode 3 (invisible but selectable)
+  instead of opaque black.
+* [fschutt/azul#480](https://github.com/fschutt/azul/pull/480): an invalid CSS selector drops its
+  whole rule. Before, `.word::selection { color: #000 }` was applied to every `.word`.
+
+`html2pdf/Cargo.toml` builds against both PR branches: printpdf as a git dependency, and azul-css
+through `[patch.crates-io]`. `Cargo.lock` pins the exact commits. Once both are released, switch
+back to crates.io versions.
 
 ## Tests
 

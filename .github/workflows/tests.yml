@@ -28,10 +28,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: html2pdf
-      - run: cargo test --release
+      - run: cargo test --release --locked
       - name: Convert a generated zip
         run: |
           pip install -e ..
           python ../tests/make_zip.py /tmp/pages.zip
-          cargo run --release -- /tmp/pages.zip -o /tmp/out.pdf
+          cargo run --release --locked -- /tmp/pages.zip -o /tmp/out.pdf
           python -c "import pymupdf; d = pymupdf.open('/tmp/out.pdf'); assert len(d) == 2, len(d); print(d[0].get_text())"
