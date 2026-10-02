@@ -7,7 +7,7 @@ license = "MIT"
 publish = false
 
 [dependencies]
-printpdf = "0.12.8"
+printpdf = { version = "0.12.8", features = ["png"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }

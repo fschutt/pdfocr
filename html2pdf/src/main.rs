@@ -119,6 +119,7 @@ fn main() -> Result<()> {
 
     let fonts = load_fonts(&args.fonts)?;
     let pool = build_font_pool(&raw_fonts(&fonts), None);
+    let images = load_images(&mut zip)?;
     let dict = load_dictionary(&args)?;
     let mut fixer = Fixer::new(args.long_s, dict.as_ref());
     let mut flow_stats = (0, 0, 0);
@@ -143,7 +144,7 @@ fn main() -> Result<()> {
         for (attempt, &scale) in scales.iter().enumerate() {
             let counts = (fixer.long_s, fixer.repaired, flow_stats);
             let html = transform(&source, page, &args, &mut fixer, dict.as_ref(), &mut flow_stats, scale);
-            let doc = render_page(&html, page, &fonts, &pool, &mut warnings)
+            let doc = render_page(&html, page, &images, &fonts, &pool, &mut warnings)
                 .with_context(|| format!("rendering {}", page.html))?;
             let last = attempt + 1 == scales.len();
             if doc.pages.len() == 1 || last {
@@ -168,7 +169,7 @@ fn main() -> Result<()> {
         if args.layout_report.is_some() {
             let (tagged, regions) = measure::tag_regions(&final_html, page.width_pt, page.height_pt);
             if !regions.is_empty() {
-                let doc = render_page(&tagged, page, &fonts, &pool, &mut Vec::new())
+                let doc = render_page(&tagged, page, &images, &fonts, &pool, &mut Vec::new())
                     .with_context(|| format!("rendering {} for the layout report", page.html))?;
                 page_reports.push(measure::report(&page.html, &doc, regions, page.width_pt, page.height_pt));
             }
@@ -285,6 +286,7 @@ fn transform(
 fn render_page(
     html: &str,
     page: &PageMeta,
+    images: &BTreeMap<String, Base64OrRaw>,
     fonts: &BTreeMap<String, Base64OrRaw>,
     pool: &SharedFontPool,
     warnings: &mut Vec<PdfWarnMsg>,
@@ -299,13 +301,23 @@ fn render_page(
         margin_left: Some(0.0),
         ..Default::default()
     };
-    let doc = PdfDocument::from_html_with_cache(html, &BTreeMap::new(), fonts, &options, warnings, Some(pool.clone()))
+    let doc = PdfDocument::from_html_with_cache(html, images, fonts, &options, warnings, Some(pool.clone()))
         .map_err(anyhow::Error::msg)?;
     if doc.pages.is_empty() {
         bail!("printpdf produced no page");
     }
     Ok(doc) // more than one page: the caller sets the text smaller or keeps the first
 
+}
+
+/// Every PNG/JPEG in the zip, keyed by its path there (what a page's `<img src>` names).
+fn load_images(zip: &mut ZipArchive<File>) -> Result<BTreeMap<String, Base64OrRaw>> {
+    let names: Vec<String> = zip
+        .file_names()
+        .filter(|n| [".png", ".jpg", ".jpeg"].iter().any(|ext| n.to_lowercase().ends_with(ext)))
+        .map(str::to_string)
+        .collect();
+    names.into_iter().map(|name| Ok((name.clone(), Base64OrRaw::Raw(read_entry(zip, &name)?)))).collect()
 }
 
 fn load_fonts(specs: &[String]) -> Result<BTreeMap<String, Base64OrRaw>> {
