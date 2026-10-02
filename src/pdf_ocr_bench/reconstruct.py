@@ -446,11 +446,9 @@ def _block(item: Item, x: float, y: float, w: float, size: float, line_h: float,
         style += " font-style: italic;"
     if nowrap:
         style += " white-space: nowrap;"
-    # azul does not apply text-indent yet: a first-line indent is no-break spaces (~0.25 em each)
-    lead = "\u00a0" * round(indent / (0.25 * size)) if indent and size else ""
-    p_style = ""
+    p_style = f' style="text-indent: {indent:.1f}pt;"' if indent else ""
     attrs = f'data-zone="{item.zone}" data-role="{item.kind}"' + (f' data-lines="{" ".join(item.lines)}"' if item.lines else "")
-    return f'<div class="region" {attrs} style="{style}"><p{p_style}>{lead}{htmlmod.escape(item.text)}</p></div>'
+    return f'<div class="region" {attrs} style="{style}"><p{p_style}>{htmlmod.escape(item.text)}</p></div>'
 
 
 # --- the pipeline ----------------------------------------------------------------------------
