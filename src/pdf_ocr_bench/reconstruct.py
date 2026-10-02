@@ -330,7 +330,12 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
             size = min(1.1 * size0, w / max(font.text_length(item.text, 1.0), 0.1))
             blocks.append(Block(item, x0, top, max(w, 1.0) * 1.02, size, 1.2 * size, "left", nowrap=True))
             continue
-        x0, w = zone.box.x0 * px, zone.box.w * px
+        if item.kind == "note" and zone.role != "notes":
+            # a note the layout did not set apart (in a column's margin): as wide as its own lines
+            gx0, gx1 = min(l.box.x0 for l in group), max(l.box.x1 for l in group)
+            x0, w = gx0 * px, (gx1 - gx0) * px * 1.05
+        else:
+            x0, w = zone.box.x0 * px, zone.box.w * px
         text = item.text
         if item.drop_cap and text.startswith(item.drop_cap):
             lh = layout.line_height
@@ -484,12 +489,25 @@ def fit_round(target: Path, page_blocks: dict[int, list[Block]], pages_meta: lis
         regions = [b for b in page_blocks[p["page_num"]] if b.item is not None]
         for block, measured in zip(regions, report["regions"]):
             rendered = measured.get("rendered")
-            if block.nowrap or not rendered or rendered["y1"] <= block.limit + 0.25 * block.size:
+            if not rendered:
                 continue
-            # fewer, smaller lines: the size by the ratio of the room to what it took, a bit less
-            took = max(rendered["y1"] - block.y, 1.0)
-            room = max(block.limit - block.y, 0.5 * block.line_h)
-            block.size *= max(0.85, min(0.97, room / took))
+            ratio = 1.0
+            if rendered["y1"] > block.limit + 0.25 * block.size:
+                # fewer, smaller lines (a smaller heading line): the ratio of the room to what it took
+                took = max(rendered["y1"] - block.y, 1.0)
+                room = max(block.limit - block.y, 0.5 * block.line_h)
+                ratio = room / took
+            if not block.indent and rendered["x1"] > block.x + block.w + 0.25 * block.size:
+                # a line wider than its box: a heading, or a word longer than a note's line. Not
+                # for an indented paragraph: azul fills its first line to the full width (and
+                # shifts it), so that line runs past by the indent whatever the size.
+                ratio = min(ratio, block.w / max(rendered["x1"] - block.x, 1.0))
+            if ratio >= 1.0:
+                continue
+            factor = max(0.85, min(0.97, ratio))  # a bit less than the ratio, at most 15% a round
+            block.size *= factor
+            if block.nowrap:
+                block.line_h *= factor  # one line: its line box is the text's
             shrunk += 1
     return shrunk
 
