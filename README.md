@@ -240,6 +240,31 @@ engine that is not selected is rejected. `pdf-ocr-bench engines` and the end of
 
 The report records every engine's effective parameters next to its model.
 
+## Correcting with an LLM
+
+`scripts/llm_correct.py` proofreads a result page by page with Claude (`claude -p`, so a Claude
+subscription works): spelling (the long s read as f, misread italics), OCR junk from pictures
+and specks, and marginal notes run into the text.
+
+```sh
+scripts/llm_correct.py results/paddleocr/pages.zip --images results/images \
+    -o results/paddleocr_haiku.zip --pdf results/paddleocr_haiku.pdf [--agents 20] [--model haiku] [--pages 1-20]
+```
+
+The pages are first rebuilt as text blocks (`html2pdf --layout flow --long-s repair`). Every page
+then goes to its own `claude -p`, up to `--agents` at once. The model gets the blocks as JSON, the
+page reduced for the layout, and the scan cut into 8 overlapping full-resolution tiles (1-bit
+PNG for black-and-white scans). For a word it still cannot read it may crop and zoom with
+ImageMagick. It returns every block corrected, with a role: `text`, `note`, `header`,
+`footnote` or `noise` (dropped). The result is a new zip that `html2pdf` renders as it is, plus
+`<output>_work/page_NNN/` with everything the model saw and answered. A page whose call fails
+keeps the uncorrected layout.
+
+The scan goes over the network: about 0.4 MB of images per page, re-sent on every turn of
+the conversation (usually 4–15 turns; `--no-zoom` makes it one). A page that runs out of turns
+is asked again without tools. Answers are kept in the work directory and reused by the next
+run of the same command (`--fresh` asks again).
+
 ## Usage
 
 ```sh

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # System packages for every engine: Tesseract with the models for the given languages,
-# ocrmypdf's tools, llama.cpp (Surya on CPU), Python >= 3.11, and Rust >= 1.88 (html2pdf).
+# ocrmypdf's tools, llama.cpp (Surya on CPU), ImageMagick (LLM correction), Python >= 3.11, and
+# Rust >= 1.88 (html2pdf).
 #
 #   scripts/install_system_deps.sh deu+eng
 #
@@ -21,7 +22,8 @@ case "$(uname -s)" in
   Darwin)
     command -v brew >/dev/null || { echo "Homebrew is required: https://brew.sh"; exit 1; }
     # tesseract-lang carries every Tesseract model (frk, Fraktur, chi_sim, ...)
-    brew install python@3.12 tesseract tesseract-lang ghostscript qpdf unpaper pngquant llama.cpp
+    # imagemagick: scripts/llm_correct.py lets the model zoom into the scan with `magick`
+    brew install python@3.12 tesseract tesseract-lang ghostscript qpdf unpaper pngquant llama.cpp imagemagick
     have_rust || brew install rust
     ;;
   Linux)
@@ -40,7 +42,7 @@ print(" ".join(tesseract_packages(parse_languages(sys.argv[1]))))
     # shellcheck disable=SC2086 # word splitting of the package list is intended
     sudo apt-get install -y --no-install-recommends \
       python3 python3-venv python3-dev build-essential \
-      tesseract-ocr ghostscript qpdf unpaper pngquant libgl1 libglib2.0-0 $packages
+      tesseract-ocr ghostscript qpdf unpaper pngquant imagemagick libgl1 libglib2.0-0 $packages
     have_rust || hint "Rust >= 1.88 is needed for html2pdf: https://rustup.rs (apt's cargo is too old)"
     command -v llama-server >/dev/null || hint "Surya needs llama-server on PATH: https://github.com/ggml-org/llama.cpp/releases (else Surya is skipped)"
     ;;
