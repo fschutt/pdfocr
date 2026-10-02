@@ -1,3 +1,8 @@
+mod flow;
+mod measure;
+mod text;
+mod words;
+
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Read;
@@ -11,7 +16,20 @@ use printpdf::{Base64OrRaw, GeneratePdfOptions, PdfDocument, PdfSaveOptions, Pdf
 use serde::Deserialize;
 use zip::ZipArchive;
 
+use text::{Dictionary, Fixer, LongS};
+
 const MM_PER_PT: f32 = 25.4 / 72.0;
+const SYSTEM_WORD_LIST: &str = "/usr/share/dict/words";
+/// Text sizes a flowed page is tried at until it fits on one page.
+const FLOW_SCALES: [f32; 4] = [1.0, 0.9, 0.8, 0.7];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum Layout {
+    /// Every word at its OCR position (as in the HTML)
+    Positioned,
+    /// Rebuild text blocks, lines and paragraphs, and set each block as flowing text in place
+    Flow,
+}
 
 /// Convert a pdf-ocr-bench `pages.zip` (page_NNN.html + metadata.json) into one text-only PDF.
 #[derive(Parser, Debug)]
@@ -31,6 +49,29 @@ struct Args {
     /// Document title
     #[arg(long, default_value = "OCR Document")]
     title: String,
+
+    /// Positioned words, or text blocks rebuilt into columns and paragraphs (joins words split
+    /// by a line-end hyphen)
+    #[arg(long, value_enum, default_value_t = Layout::Positioned)]
+    layout: Layout,
+
+    /// The long s (ſ) of old print: keep it, turn it into s, or also repair f read for it
+    /// ("fhould" -> "should") using the word list
+    #[arg(long, value_enum, default_value_t = LongS::Keep)]
+    long_s: LongS,
+
+    /// Word list for `--long-s repair` and for joining hyphenated words, one word per line
+    #[arg(long, value_name = "PATH", default_value = SYSTEM_WORD_LIST)]
+    dict: PathBuf,
+
+    /// Also write the HTML each page is rendered from into this directory
+    #[arg(long, value_name = "DIR")]
+    html_out: Option<PathBuf>,
+
+    /// Write where the layout engine put each text block (`.region`) of every page, and the
+    /// problems that shows (text outside its box, off the page, blocks overlapping), as JSON
+    #[arg(long, value_name = "FILE")]
+    layout_report: Option<PathBuf>,
 
     /// Print printpdf warnings
     #[arg(short, long)]
@@ -78,6 +119,13 @@ fn main() -> Result<()> {
 
     let fonts = load_fonts(&args.fonts)?;
     let pool = build_font_pool(&raw_fonts(&fonts), None);
+    let dict = load_dictionary(&args)?;
+    let mut fixer = Fixer::new(args.long_s, dict.as_ref());
+    let mut flow_stats = (0, 0, 0);
+    let mut page_reports = Vec::new();
+    if let Some(dir) = &args.html_out {
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
 
     let mut pages = metadata.pages;
     pages.sort_by_key(|p| p.page_num);
@@ -86,8 +134,47 @@ fn main() -> Result<()> {
     let mut warnings = Vec::new();
     for (i, page) in pages.iter().enumerate() {
         let page_start = Instant::now();
-        let rendered = render_page(&mut zip, page, &fonts, &pool, &mut warnings)
-            .with_context(|| format!("rendering {}", page.html))?;
+        let source = String::from_utf8(read_entry(&mut zip, &page.html)?).context("page HTML is not UTF-8")?;
+        // A flowed page whose text runs off the page (printpdf starts a second one) is set again
+        // smaller; positioned words always fit.
+        let scales: &[f32] = if args.layout == Layout::Flow { &FLOW_SCALES } else { &[1.0] };
+        let mut rendered = None;
+        let mut final_html = String::new();
+        for (attempt, &scale) in scales.iter().enumerate() {
+            let counts = (fixer.long_s, fixer.repaired, flow_stats);
+            let html = transform(&source, page, &args, &mut fixer, dict.as_ref(), &mut flow_stats, scale);
+            let doc = render_page(&html, page, &fonts, &pool, &mut warnings)
+                .with_context(|| format!("rendering {}", page.html))?;
+            let last = attempt + 1 == scales.len();
+            if doc.pages.len() == 1 || last {
+                if doc.pages.len() > 1 {
+                    eprintln!(
+                        "[html2pdf] {}: text still runs off the page at {:.0}% size; only the first page is kept",
+                        page.html,
+                        100.0 * scale
+                    );
+                } else if scale < 1.0 {
+                    eprintln!("[html2pdf] {}: set at {:.0}% size to fit the page", page.html, 100.0 * scale);
+                }
+                if let Some(dir) = &args.html_out {
+                    std::fs::write(dir.join(&page.html), &html).with_context(|| format!("writing {}", page.html))?;
+                }
+                rendered = Some(doc);
+                final_html = html;
+                break;
+            }
+            (fixer.long_s, fixer.repaired, flow_stats) = counts; // the next attempt counts again
+        }
+        if args.layout_report.is_some() {
+            let (tagged, regions) = measure::tag_regions(&final_html, page.width_pt, page.height_pt);
+            if !regions.is_empty() {
+                let doc = render_page(&tagged, page, &fonts, &pool, &mut Vec::new())
+                    .with_context(|| format!("rendering {} for the layout report", page.html))?;
+                page_reports.push(measure::report(&page.html, &doc, regions, page.width_pt, page.height_pt));
+            }
+        }
+        let mut rendered = rendered.expect("at least one attempt");
+        rendered.pages.truncate(1);
         doc.append_document(rendered);
         let (w, h) = page.size_mm();
         println!(
@@ -99,9 +186,36 @@ fn main() -> Result<()> {
         );
     }
 
+    if let Some(path) = &args.layout_report {
+        let totals = page_reports.iter().map(|r| r.problems()).fold((0, 0, 0, 0), |a, b| (a.0 + b.0, a.1 + b.1, a.2 + b.2, a.3 + b.3));
+        let blocks: usize = page_reports.iter().map(|r| r.regions.len()).sum();
+        std::fs::write(path, serde_json::to_string_pretty(&page_reports)?).with_context(|| format!("writing {}", path.display()))?;
+        println!(
+            "[html2pdf] Layout report {}: {blocks} blocks; {} with text outside their box, {} off the page, {} overlapping another, {} not drawn",
+            path.display(),
+            totals.0,
+            totals.1,
+            totals.2,
+            totals.3
+        );
+    }
     let bytes = doc.save(&PdfSaveOptions::default(), &mut warnings);
     std::fs::write(&output, &bytes).with_context(|| format!("writing {}", output.display()))?;
     report_warnings(&warnings, args.verbose);
+    if args.layout == Layout::Flow {
+        let (regions, paragraphs, joined) = flow_stats;
+        println!("[html2pdf] Flow layout: {regions} text blocks, {paragraphs} paragraphs, {joined} hyphenated words joined");
+    }
+    if args.long_s != LongS::Keep {
+        let mut examples: Vec<_> = fixer.examples.iter().map(|(from, to)| format!("{from} -> {to}")).collect();
+        examples.sort();
+        println!(
+            "[html2pdf] Long s: {} words with ſ turned to s, {} words repaired{}",
+            fixer.long_s,
+            fixer.repaired,
+            if examples.is_empty() { String::new() } else { format!(" (e.g. {})", examples.join(", ")) }
+        );
+    }
     println!(
         "[html2pdf] Wrote {} ({} pages, {:.1} KiB) in {:.1}s",
         output.display(),
@@ -124,15 +238,57 @@ fn read_entry(zip: &mut ZipArchive<File>, name: &str) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// The word list, if `--long-s repair` or `--layout flow` (hyphen joining) uses one. Without it,
+/// repair is an error and flow joins every line-end hyphen.
+fn load_dictionary(args: &Args) -> Result<Option<Dictionary>> {
+    let needed = args.long_s == LongS::Repair || args.layout == Layout::Flow;
+    if !needed {
+        return Ok(None);
+    }
+    match Dictionary::load(&args.dict) {
+        Ok(dict) => {
+            println!("[html2pdf] Word list {}: {} words", args.dict.display(), dict.len());
+            Ok(Some(dict))
+        }
+        Err(err) if args.long_s == LongS::Repair => Err(err.context("--long-s repair needs a word list (--dict PATH)")),
+        Err(err) => {
+            eprintln!("[html2pdf] {err:#}; line-end hyphens are joined without checking words");
+            Ok(None)
+        }
+    }
+}
+
+/// The page HTML as it will be rendered: words fixed for `--long-s`, and rebuilt for `--layout flow`.
+fn transform(
+    html: &str,
+    page: &PageMeta,
+    args: &Args,
+    fixer: &mut Fixer,
+    dict: Option<&Dictionary>,
+    stats: &mut (usize, usize, usize),
+    scale: f32,
+) -> String {
+    match args.layout {
+        Layout::Positioned if args.long_s == LongS::Keep => html.to_string(),
+        Layout::Positioned => words::rewrite_texts(html, |word| fixer.word(word)),
+        Layout::Flow => {
+            let lang = words::html_lang(html).unwrap_or("en").to_string();
+            let (flowed, s) =
+                flow::page_html(&words::parse_words(html), page.width_pt, page.height_pt, &lang, fixer, dict, scale);
+            *stats = (stats.0 + s.regions, stats.1 + s.paragraphs, stats.2 + s.hyphens_joined);
+            flowed
+        }
+    }
+}
+
 /// Render one HTML page to a single-page document sized from metadata.json.
 fn render_page(
-    zip: &mut ZipArchive<File>,
+    html: &str,
     page: &PageMeta,
     fonts: &BTreeMap<String, Base64OrRaw>,
     pool: &SharedFontPool,
     warnings: &mut Vec<PdfWarnMsg>,
 ) -> Result<PdfDocument> {
-    let html = String::from_utf8(read_entry(zip, &page.html)?).context("page HTML is not UTF-8")?;
     let (width, height) = page.size_mm();
     let options = GeneratePdfOptions {
         page_width: Some(width),
@@ -143,13 +299,13 @@ fn render_page(
         margin_left: Some(0.0),
         ..Default::default()
     };
-    let doc = PdfDocument::from_html_with_cache(&html, &BTreeMap::new(), fonts, &options, warnings, Some(pool.clone()))
+    let doc = PdfDocument::from_html_with_cache(html, &BTreeMap::new(), fonts, &options, warnings, Some(pool.clone()))
         .map_err(anyhow::Error::msg)?;
-    match doc.pages.len() {
-        1 => Ok(doc),
-        0 => bail!("printpdf produced no page"),
-        n => bail!("content overflowed into {n} pages; the page box must fit the page size"),
+    if doc.pages.is_empty() {
+        bail!("printpdf produced no page");
     }
+    Ok(doc) // more than one page: the caller sets the text smaller or keeps the first
+
 }
 
 fn load_fonts(specs: &[String]) -> Result<BTreeMap<String, Base64OrRaw>> {
