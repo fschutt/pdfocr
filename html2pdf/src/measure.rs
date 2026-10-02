@@ -2,12 +2,13 @@
 //!
 //! The page is rendered once more with every block in its own text colour, `rgb(0, g, b)` with
 //! (g, b) the block number. In the rendered ops, the fill colour set before each glyph run says
-//! which block the run belongs to, and the run's text matrices give its glyph positions. That is
+//! which block the run belongs to; the run's text matrix and the glyphs' advance widths (from the
+//! fonts printpdf embeds, plus the kerning in the run) give where its glyphs are. That is
 //! the rendered extent of every block, to compare with the box its CSS asked for and with the other
 //! blocks: text outside its own box points at the layout engine, blocks that overlap while each
 //! stays inside its box point at the boxes (the page's HTML).
 
-use printpdf::{Color, Op, PdfDocument};
+use printpdf::{Color, Op, PdfDocument, PdfFontHandle};
 use serde::Serialize;
 
 use crate::words::unescape;
@@ -132,6 +133,7 @@ pub fn report(page: &str, doc: &PdfDocument, regions: Vec<Region>, width_pt: f32
     let mut extents: Vec<Option<Rect>> = vec![None; regions.len()];
     let mut current: Option<usize> = None;
     let mut size = 0.0f32;
+    let mut font: Option<&printpdf::PdfFont> = None;
     let mut origin: Option<(f32, f32)> = None;
     for op in doc.pages.first().map(|p| p.ops.as_slice()).unwrap_or_default() {
         match op {
@@ -141,25 +143,25 @@ pub fn report(page: &str, doc: &PdfDocument, regions: Vec<Region>, width_pt: f32
                 current = (r == 0 && k >= 1 && k <= regions.len()).then(|| k - 1);
             }
             Op::SetFillColor { .. } => current = None,
-            Op::SetFont { size: s, .. } => size = s.0,
+            Op::SetFont { size: s, font: handle } => {
+                size = s.0;
+                font = match handle {
+                    PdfFontHandle::External(id) => doc.resources.fonts.map.get(id),
+                    PdfFontHandle::Builtin(_) => None,
+                };
+            }
             Op::SetTextMatrix { matrix } => {
                 let m = matrix.as_array();
                 origin = Some((m[4], m[5]));
             }
             Op::ShowText { items } => {
                 let (Some(k), Some((x, y))) = (current, origin) else { continue };
-                let glyphs: usize = items
-                    .iter()
-                    .map(|i| match i {
-                        printpdf::TextItem::GlyphIds(g) => g.len(),
-                        printpdf::TextItem::Text(t) => t.chars().count(),
-                        printpdf::TextItem::Offset(_) => 0,
-                    })
-                    .sum();
-                // glyph origin on the baseline (PDF y up); a glyph is ~0.55 em wide, ascends 0.75 em
+                let advance = run_advance(items, font, size);
+                origin = Some((x + advance, y)); // a show op without a new Tm continues here
+                // the run on its baseline (PDF y up); text ascends ~0.75 em, descends ~0.2 em
                 let glyph = Rect {
                     x0: x,
-                    x1: x + 0.55 * size * glyphs.max(1) as f32,
+                    x1: x + advance.max(0.0),
                     y0: height_pt - y - 0.75 * size,
                     y1: height_pt - y + 0.2 * size,
                 };
@@ -195,6 +197,28 @@ pub fn report(page: &str, doc: &PdfDocument, regions: Vec<Region>, width_pt: f32
         }
     }
     PageReport { page: page.to_string(), width_pt, height_pt, regions: reports }
+}
+
+/// How far a text-show op moves the pen, in pt: the glyphs' advance widths from the embedded font,
+/// and the kerning numbers between them (thousandths of an em, positive moves left). Without the
+/// font, half an em per glyph.
+fn run_advance(items: &[printpdf::TextItem], font: Option<&printpdf::PdfFont>, size: f32) -> f32 {
+    let per_em = |gid: u16| -> f32 {
+        font.map_or(0.5, |f| {
+            let upem = f32::from(f.parsed_font.font_metrics.units_per_em.max(1));
+            f32::from(f.parsed_font.get_horizontal_advance(gid)) / upem
+        })
+    };
+    items
+        .iter()
+        .map(|item| match item {
+            printpdf::TextItem::GlyphIds(glyphs) => {
+                glyphs.iter().map(|g| (per_em(g.gid) - g.offset / 1000.0) * size).sum::<f32>()
+            }
+            printpdf::TextItem::Offset(o) => -o / 1000.0 * size,
+            printpdf::TextItem::Text(t) => 0.5 * size * t.chars().count() as f32,
+        })
+        .sum()
 }
 
 fn attr<'a>(tag: &'a str, name: &str) -> Option<&'a str> {

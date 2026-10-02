@@ -143,8 +143,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 [[package]]
 name = "azul-core"
 version = "0.0.16"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "00174fb58e1c8cb8ae1b089c7c28b4ec17ffcec56ffab1af59a042390f907278"
+source = "git+https://github.com/fschutt/azul?branch=fix%2Finput-bugs-2026-09-19#2e92c759bad9daaf41eac2ad6189fa587cf7e60c"
 dependencies = [
  "azul-css",
  "gl-context-loader",
@@ -155,8 +154,7 @@ dependencies = [
 [[package]]
 name = "azul-css"
 version = "0.0.16"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c2e635a63e2bf08b9b8e410aa1bdee53ccb1462ae021034e2c82373b05b2b306"
+source = "git+https://github.com/fschutt/azul?branch=fix%2Finput-bugs-2026-09-19#2e92c759bad9daaf41eac2ad6189fa587cf7e60c"
 dependencies = [
  "azul-simplecss",
  "libm",
@@ -165,8 +163,7 @@ dependencies = [
 [[package]]
 name = "azul-layout"
 version = "0.0.16"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "38d84675106afffa51082e9bd416ba19683663bb49eb6b52caefac9bf3c27a62"
+source = "git+https://github.com/fschutt/azul?branch=fix%2Finput-bugs-2026-09-19#2e92c759bad9daaf41eac2ad6189fa587cf7e60c"
 dependencies = [
  "allsorts-azul",
  "azul-core",
@@ -885,8 +882,7 @@ checksum = "439ee305def115ba05938db6eb1644ff94165c5ab5e9420d1c1bcedbba909391"
 [[package]]
 name = "printpdf"
 version = "0.12.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "95d50369c5e18e18d4716bd855172db3a70f9e82c966687ae051ea58138f285c"
+source = "git+https://github.com/fschutt/printpdf?branch=azul-codegen-api#84dce8c47850f5fe18012998f9689a7e2f743136"
 dependencies = [
  "allsorts-azul",
  "azul-core",

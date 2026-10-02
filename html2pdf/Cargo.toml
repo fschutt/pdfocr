@@ -7,7 +7,9 @@ license = "MIT"
 publish = false
 
 [dependencies]
-printpdf = { version = "0.12.8", features = ["png"] }
+# printpdf and azul from their fix branches: column-count across paragraphs (azul#481), the
+# space glyph and one text object per line (printpdf#288/#289), and many layout fixes
+printpdf = { git = "https://github.com/fschutt/printpdf", branch = "azul-codegen-api", features = ["png"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
@@ -16,3 +18,9 @@ anyhow = "1"
 
 [profile.release]
 opt-level = 3
+
+# printpdf's branch still asks for azul 0.0.16 from crates.io but uses the newer azul API
+[patch.crates-io]
+azul-css = { git = "https://github.com/fschutt/azul", branch = "fix/input-bugs-2026-09-19" }
+azul-core = { git = "https://github.com/fschutt/azul", branch = "fix/input-bugs-2026-09-19" }
+azul-layout = { git = "https://github.com/fschutt/azul", branch = "fix/input-bugs-2026-09-19" }
