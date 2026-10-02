@@ -8,7 +8,7 @@ from pathlib import Path
 
 from ..languages import Language
 from ..models import BBox, OcrWord, PageImage
-from .base import OcrEngine, PageTimeout, Route
+from .base import LayoutIds, OcrEngine, PageTimeout, Route
 from .tesseract import PSM, tesseract_preflight, tesseract_route
 
 
@@ -101,9 +101,13 @@ def pdf_words(path: Path) -> list[OcrWord]:
     try:
         page = doc[0]
         w, h = page.rect.width, page.rect.height
+        lines = LayoutIds()
         return [
-            OcrWord(text=text, bbox=BBox.from_pixels(x0, y0, x1, y1, w, h), confidence=1.0)
-            for x0, y0, x1, y1, text, *_ in page.get_text("words")
+            OcrWord(
+                text=text, bbox=BBox.from_pixels(x0, y0, x1, y1, w, h), confidence=1.0,
+                block=block, line=lines((block, line)),
+            )
+            for x0, y0, x1, y1, text, block, line, _ in page.get_text("words")
         ]
     finally:
         doc.close()

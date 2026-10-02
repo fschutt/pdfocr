@@ -11,7 +11,7 @@ import pytest
 
 from pdf_ocr_bench import pipeline, plan
 from pdf_ocr_bench.engines import ENGINES, OcrEngine, Route, select_engines
-from pdf_ocr_bench.engines.base import split_block, split_line, words_to_text
+from pdf_ocr_bench.engines.base import LayoutIds, group_lines, split_block, split_line, tag, words_to_text
 from pdf_ocr_bench.engines.paddleocr_engine import line_words
 from pdf_ocr_bench.evaluation import metrics
 from pdf_ocr_bench.html_output.layout import text_width_em, word_styles
@@ -110,6 +110,35 @@ def test_words_to_text_orders_lines_and_words():
     assert words_to_text(words) == "Hello world\nsecond"
 
 
+def test_engine_lines_win_over_geometry():
+    # an engine box two lines tall ("tall") would pull "a" and "b" into one geometric line
+    a, tall, b = word("a", 0.1, 0.10, h=0.02), word("tall", 0.3, 0.10, h=0.05), word("b", 0.1, 0.13, h=0.02)
+    assert [[w.text for w in l] for l in group_lines([a, tall, b])] == [["a", "b", "tall"]]  # one merged line
+    tag([a, tall], line=0), tag([b], line=1)
+    assert [[w.text for w in l] for l in group_lines([b, tall, a])] == [["a", "tall"], ["b"]]
+
+
+def test_layout_ids_are_page_unique_and_survive_splitting():
+    ids = LayoutIds()
+    assert [ids(k) for k in [(1, 1), (1, 2), (1, 1), (2, 1)]] == [0, 1, 0, 2]
+    words = tag(split_line("two words", BBox(x=0, y=0, w=1, h=0.1), 0.9), block=3, par=4, line=5)
+    assert {(w.block, w.par, w.line) for w in words} == {(3, 4, 5)}
+    block = split_block(["first line", "second"], BBox(x=0, y=0, w=1, h=0.2), 0.9, block=7, first_line=10)
+    assert [(w.text, w.block, w.line) for w in block] == [("first", 7, 10), ("line", 7, 10), ("second", 7, 11)]
+
+
+def test_engine_split_words_keep_layout_ids():
+    class Joined(OcrEngine):
+        name, display_name = "joined", "Joined"
+
+        def ocr_page(self, image, lang):
+            return tag([word("one two", 0.1, 0.1)], block=1, line=2)
+
+    image = PageImage(page_num=0, path=Path("unused.png"), width_px=10, height_px=10, width_pt=10, height_pt=10, dpi=72)
+    words = Joined(Route()).run(image).words
+    assert [(w.text, w.block, w.line) for w in words] == [("one", 1, 2), ("two", 1, 2)]
+
+
 def test_metrics():
     assert metrics.cer("abc", "abc") == 0.0
     assert metrics.cer("", "") == 0.0
@@ -153,6 +182,13 @@ def test_page_html():
     assert "a&lt;b&amp;c </span>" in html  # escaped, with the inter-word space
     assert ">ß</span>" in html  # last word of the line: no trailing space
     assert "left: 10.0000%" in html
+    assert "data-line" not in html  # engines without layout ids write none
+
+
+def test_page_html_writes_layout_ids():
+    w = tag([word("x", 0.1, 0.2)], block=2, par=0, line=5)[0]
+    html = render_page_html(load_template(), _page([w]), 595.28, 841.89)
+    assert 'data-block="2" data-par="0" data-line="5">x</span>' in html
     style = html[html.index("<style>") : html.index("</style>")]
     assert "color: #000;" in style and "transparent" not in style
 

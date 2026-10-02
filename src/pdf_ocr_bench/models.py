@@ -49,6 +49,12 @@ class OcrWord(BaseModel):
     text: str
     bbox: BBox
     confidence: float  # 0..1
+    # The engine's own layout, as ids unique within the page (None: the engine has no such level).
+    # Words with the same `line` were recognized as one text line; `par` and `block` group lines
+    # into paragraphs and text blocks (columns, headers, notes) where the engine reports them.
+    block: int | None = None
+    par: int | None = None
+    line: int | None = None
 
 
 class PageResult(BaseModel):

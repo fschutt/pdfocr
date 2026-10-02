@@ -12,7 +12,7 @@ import sys
 
 from ..languages import Language
 from ..models import BBox, OcrWord, PageImage
-from .base import OcrEngine, Option, Route, split_line, unsupported
+from .base import OcrEngine, Option, Route, split_line, tag, unsupported
 
 
 class MacOSVisionEngine(OcrEngine):
@@ -79,7 +79,11 @@ class MacOSVisionEngine(OcrEngine):
             ok, error = handler.performRequests_error_([request], None)
             if not ok:
                 raise RuntimeError(f"Vision request failed: {error}")
-            return [word for observation in request.results() or [] for word in _observation_words(observation)]
+            return [
+                word
+                for line, observation in enumerate(request.results() or [])
+                for word in tag(_observation_words(observation), line=line)
+            ]
 
 
 def _observation_words(observation) -> list[OcrWord]:

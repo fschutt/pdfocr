@@ -6,7 +6,7 @@ from functools import lru_cache
 
 from ..languages import Language
 from ..models import BBox, OcrWord, PageImage
-from .base import OcrEngine, Option, PageTimeout, Route, unsupported
+from .base import LayoutIds, OcrEngine, Option, PageTimeout, Route, unsupported
 
 
 @lru_cache(maxsize=1)
@@ -83,13 +83,20 @@ class TesseractEngine(OcrEngine):
             if "timeout" in str(exc).lower():
                 raise PageTimeout(f"exceeded {self.timeout:.0f}s") from exc
             raise
-        rows = zip(data["text"], data["conf"], data["left"], data["top"], data["width"], data["height"])
+        rows = zip(
+            data["text"], data["conf"], data["left"], data["top"], data["width"], data["height"],
+            data["block_num"], data["par_num"], data["line_num"],
+        )  # fmt: skip
+        pars, lines = LayoutIds(), LayoutIds()
         return [
             OcrWord(
                 text=text.strip(),
                 bbox=BBox.from_pixels(left, top, left + w, top + h, image.width_px, image.height_px),
                 confidence=max(0.0, float(conf)) / 100.0,
+                block=block,
+                par=pars((block, par)),
+                line=lines((block, par, line)),
             )
-            for text, conf, left, top, w, h in rows
+            for text, conf, left, top, w, h, block, par, line in rows
             if text.strip() and float(conf) >= 0
         ]

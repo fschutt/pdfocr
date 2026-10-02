@@ -25,7 +25,7 @@ def test_parse_languages_rejects_malformed(spec):
 
 
 def test_parse_languages_rejects_unknown_codes_and_lists_the_supported_ones():
-    with pytest.raises(LanguageError, match=r"unknown language code\(s\): german, xx\. Supported: eng, deu"):
+    with pytest.raises(LanguageError, match=r"unknown language code\(s\): german, xx\. Supported: eng, enm, deu"):
         parse_languages("german+deu+xx")
 
 
@@ -82,6 +82,16 @@ def test_ocrmypdf_rapid_passes_one_code_and_the_recognizer_version():
     assert route("ocrmypdf_rapid", "deu_frak+eng").lang == ("deu", "PP-OCRv5", "mobile")
     assert route("ocrmypdf_rapid", "eng").lang == ("eng", "PP-OCRv6", "small")
     assert route("ocrmypdf_rapid", "lat").lang[0] == "ita"
+    assert route("ocrmypdf_rapid", "enm").lang == ("eng", "PP-OCRv6", "small")
+
+
+def test_historical_english_uses_the_english_models_except_in_tesseract():
+    assert route("tesseract", "enm").detail == "enm"
+    assert route("rapidocr", "enm").lang == "en"
+    assert route("paddleocr", "enm").lang == "en"
+    assert route("easyocr", "enm+eng").lang == ("en",)
+    assert route("doctr", "enm").lang == "builtin"
+    assert route("macos_vision", "enm").lang == ("en-US",)
 
 
 def test_vlm_engines_need_no_language():

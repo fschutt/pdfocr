@@ -7,3 +7,5 @@ results/
 !sample.pdf
 
 html2pdf/target/
+files/
+.DS_Store

@@ -99,7 +99,7 @@ pdf-ocr-bench run INPUT_PDF [OPTIONS]
 | `-e, --engines` | `all` | `all`, or a comma list of `tesseract, rapidocr, paddleocr, easyocr, doctr, surya, ocrmypdf, ocrmypdf_rapid, macos_vision, olmocr` |
 | `--preprocess` | none | Image filters applied in order before OCR, e.g. `grayscale,deskew,denoise`. See [Preprocessing](#preprocessing). |
 | `-O, --engine-option` | none | Engine parameter `ENGINE.KEY=VALUE`, repeatable. See [Engine parameters](#engine-parameters). |
-| `--dpi` | `300` | Resolution the pages are rendered at for the engines (72–1200). 150 is a quick draft; 400–600 helps with small print. |
+| `--dpi` | `300` | Resolution the pages are rendered at for the engines (72–1200). 150 is a quick draft; 400–600 helps with small print. For 1-bit (black/white) scans, render a bit *below* the scan's own resolution: pdfium then smooths the jagged edges, which macOS Vision in particular reads much better. |
 | `--pages` | all | Page range, 1-based and inclusive: `3`, `1-5`, `1,3,7-10` |
 | `--timeout-per-page` | `300` | Seconds per page and engine before the page is skipped (`0` = no limit) |
 | `--include-gpu-engines` | off | With `--engines all`, also run GPU engines (olmOCR) |
@@ -158,6 +158,7 @@ languages:
 | Code | Language | Tesseract | RapidOCR | PaddleOCR | EasyOCR | docTR | macOS Vision |
 |---|---|---|---|---|---|---|---|
 | `eng` | English | eng | PP-OCRv6 small | PP-OCRv6 multilingual | en | built-in | en-US |
+| `enm` | English, historical (long s) | enm | PP-OCRv6 small | PP-OCRv6 multilingual | en | built-in | en-US |
 | `deu` | German | deu | latin PP-OCRv5 | PP-OCRv6 multilingual | de | multilingual PARSeq | de-DE |
 | `deu_frak` | German (Fraktur) | frk → Fraktur | latin PP-OCRv5 | PP-OCRv6 multilingual | de | multilingual PARSeq | de-DE |
 | `frk` | Fraktur | frk → Fraktur | latin PP-OCRv5 | PP-OCRv6 multilingual | de | multilingual PARSeq | de-DE |
@@ -194,6 +195,10 @@ Fraktur) or the `Fraktur` script model, whichever is installed (`tesseract-ocr-f
 `tesseract-ocr-script-frak`). The other engines have no Fraktur model and read blackletter with
 their German/Latin model; comparing them is what this tool is for.
 
+Historical English (16th–18th century print): use `enm`. Tesseract's Middle English model knows
+the long s and keeps it (`ſhould`, `Addreſſes`), where `eng` reads it as f (`fhould`,
+`Addrefles`). The other engines have no long-s model and read `enm` with their English model.
+
 ### Preprocessing
 
 `--preprocess` applies filters to the page renders once, in the given order, before any engine
@@ -224,7 +229,7 @@ engine that is not selected is rejected. `pdf-ocr-bench engines` and the end of
 |---|---|---|
 | `tesseract` | Tesseract 5 LSTM models, one per `--lang` code | `psm=3`: page segmentation mode (1, 3–13; 3 automatic, 4 one column, 6 one block, 11 sparse text) |
 | `rapidocr` | PP-OCR on ONNX Runtime (PP-OCRv6 small for en/zh/ja, PP-OCRv5 mobile otherwise) | `min_score=0.5` (0–1): drop lines recognized below it; `text_orientation=true`: turn upside-down lines |
-| `paddleocr` | PaddleOCR 3.x (PP-OCRv6 medium multilingual, or the PP-OCRv5 model of the script) | `min_score=0.0` (0–1); `textline_orientation=true` |
+| `paddleocr` | PaddleOCR 3.x (PP-OCRv6 medium multilingual, or the PP-OCRv5 model of the script) | `min_score=0.0` (0–1); `textline_orientation=true`; `det_max_side=0`: shrink the page to this many px for text detection only (0 = full size, up to 4000) |
 | `easyocr` | CRAFT detector + one CRNN recognizer per script group | `decoder=greedy` (greedy, beamsearch, wordbeamsearch) |
 | `doctr` | detector + CRNN (en/fr) or multilingual PARSeq | `det_arch=fast_base` (fast_*, db_*, linknet_*); `straight_pages=true` |
 | `surya` | Surya 2 VLM via llama.cpp / vLLM | none |
@@ -282,7 +287,10 @@ go into a zip.
 
 Each HTML page has fixed `pt` dimensions (the source PDF page size), `<meta name="pdf.options.pageWidth/
 pageHeight">` in mm for converters, and one `<span class="word">` per word. The span's `left`,
-`width` and `height` are the OCR box as percentages of the page, and it carries `data-confidence`.
+`width` and `height` are the OCR box as percentages of the page, and it carries `data-confidence`
+and the engine's layout as page-unique ids: `data-line` (all engines; Surya and olmOCR spread
+their lines evenly), `data-par` (Tesseract) and `data-block` (Tesseract, ocrmypdf, docTR, Surya).
+Words of one engine line are set as one line, even when an engine's boxes overlap the next line.
 The text is black Helvetica (`Helvetica, Arial, sans-serif`); layout lives in
 `html_output/layout.py`:
 
@@ -310,7 +318,7 @@ HTML file name, the page size in px and pt, words, confidence, time, and any ski
 |---|---|---|
 | `tesseract` | native | languages resolved against the installed models (`tesseract --list-langs`) |
 | `rapidocr` | native (`return_word_box`) | PP-OCRv6 for en/zh/ja, PP-OCRv5 mobile for Latin, East Slavic, Arabic, Korean |
-| `paddleocr` | native (`return_word_box`); the recognized line text decides word boundaries | runs with `enable_mkldnn=False` (PaddlePaddle 3.x oneDNN crashes on CPU); slow on CPU, about 2 min per page at 300 DPI |
+| `paddleocr` | native (`return_word_box`); the recognized line text decides word boundaries | runs with `enable_mkldnn=False` (PaddlePaddle 3.x oneDNN crashes on CPU); slow on CPU, about 1.5 min per dense page at 300 DPI; `-O paddleocr.det_max_side=2048` halves that with nearly the same text |
 | `easyocr` | line boxes split by character count | |
 | `doctr` | native | multilingual PARSeq from the HF hub for languages beyond English/French |
 | `surya` | block boxes, lines spread evenly | Surya 2 is a VLM served by llama.cpp/vLLM; slow on CPU |

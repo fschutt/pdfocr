@@ -71,16 +71,18 @@ class SuryaEngine(OcrEngine):
         with Image.open(image.path) as img:
             page = self._rec([img.convert("RGB")])[0]
         width, height = page.image_bbox[2] or image.width_px, page.image_bbox[3] or image.height_px
-        return [
-            word
-            for block in page.blocks
-            if not block.skipped and not block.error and block.html
-            for word in split_block(
+        words: list[OcrWord] = []
+        blocks = [b for b in page.blocks if not b.skipped and not b.error and b.html]
+        for i, block in enumerate(blocks):
+            first_line = 1 + max((w.line for w in words), default=-1)
+            words += split_block(
                 html_to_lines(block.html),
                 BBox.from_pixels(*block.bbox, width, height),
                 float(block.confidence or 0.0),
+                block=i,
+                first_line=first_line,
             )
-        ]
+        return words
 
 
 def html_to_lines(fragment: str) -> list[str]:

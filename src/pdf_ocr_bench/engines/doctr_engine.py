@@ -47,11 +47,13 @@ class DoctrEngine(OcrEngine):
         from doctr.io import DocumentFile
 
         doc = self._model(DocumentFile.from_images([str(image.path)]))
+        lines = [(b, line) for page in doc.pages for b, block in enumerate(page.blocks) for line in block.lines]
         return [
-            OcrWord(text=word.value, bbox=BBox.from_corners(x0, y0, x1, y1), confidence=float(word.confidence))
-            for page in doc.pages
-            for block in page.blocks
-            for line in block.lines
+            OcrWord(
+                text=word.value, bbox=BBox.from_corners(x0, y0, x1, y1), confidence=float(word.confidence),
+                block=b, line=i,
+            )
+            for i, (b, line) in enumerate(lines)
             for word in line.words
             for (x0, y0), (x1, y1) in [_corners(word.geometry)]
         ]

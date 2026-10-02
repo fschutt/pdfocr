@@ -145,7 +145,7 @@ class OcrEngine(ABC):
             for w in words
             if w.bbox.w > 0 and w.bbox.h > 0
             # a word never contains whitespace; split what an engine returned joined
-            for part in split_line(w.text.strip(), w.bbox, w.confidence)
+            for part in tag(split_line(w.text.strip(), w.bbox, w.confidence), block=w.block, par=w.par, line=w.line)
         ]
         return PageResult(
             page_num=image.page_num,
@@ -180,8 +180,37 @@ def run_with_timeout(fn: Callable[[], T], timeout: float | None) -> T:
     return box["value"]
 
 
+def tag(words: list[OcrWord], *, block: int | None = None, par: int | None = None, line: int | None = None) -> list[OcrWord]:
+    """Record the engine's layout ids (unique within the page) on `words`; returns them."""
+    for word in words:
+        word.block, word.par, word.line = block, par, line
+    return words
+
+
+class LayoutIds:
+    """Page-unique ids for nested engine keys, in order of first appearance: (2, 1) -> 0, (2, 3) -> 1."""
+
+    def __init__(self) -> None:
+        self._ids: dict[Any, int] = {}
+
+    def __call__(self, key: Any) -> int:
+        return self._ids.setdefault(key, len(self._ids))
+
+
 def group_lines(words: Iterable[OcrWord]) -> list[list[OcrWord]]:
-    """Group words into lines by vertical overlap; lines top to bottom, words left to right."""
+    """Lines top to bottom, words left to right.
+
+    The engine's own lines when every word has one: geometry alone merges neighbouring lines
+    whenever an engine returns boxes taller than the line spacing. Otherwise words are grouped
+    by vertical overlap.
+    """
+    words = list(words)
+    if words and all(w.line is not None for w in words):
+        by_line: dict[int, list[OcrWord]] = {}
+        for word in words:
+            by_line.setdefault(word.line, []).append(word)
+        lines = sorted(by_line.values(), key=lambda l: (min(w.bbox.y for w in l), min(w.bbox.x for w in l)))
+        return [sorted(l, key=lambda w: w.bbox.x) for l in lines]
     lines: list[list[OcrWord]] = []
     for word in sorted(words, key=lambda w: (w.bbox.y + w.bbox.h / 2, w.bbox.x)):
         line = next((l for l in reversed(lines[-3:]) if _same_line(l[-1].bbox, word.bbox)), None)
@@ -221,8 +250,13 @@ def split_line(text: str, bbox: BBox, confidence: float) -> list[OcrWord]:
     ]
 
 
-def split_block(lines: list[str], bbox: BBox, confidence: float) -> list[OcrWord]:
-    """Distribute text lines evenly over a block box, then split each into words."""
+def split_block(
+    lines: list[str], bbox: BBox, confidence: float, block: int | None = None, first_line: int = 0
+) -> list[OcrWord]:
+    """Distribute text lines evenly over a block box, then split each into words.
+
+    The words are tagged with `block` and line ids counting up from `first_line`.
+    """
     lines = [l for l in lines if l.strip()]
     if not lines:
         return []
@@ -231,9 +265,13 @@ def split_block(lines: list[str], bbox: BBox, confidence: float) -> list[OcrWord
     return [
         word
         for i, line in enumerate(lines)
-        for word in split_line(
-            line.strip(),
-            BBox(x=bbox.x, y=bbox.y + i * line_h, w=bbox.w * len(line.strip()) / longest, h=line_h),
-            confidence,
+        for word in tag(
+            split_line(
+                line.strip(),
+                BBox(x=bbox.x, y=bbox.y + i * line_h, w=bbox.w * len(line.strip()) / longest, h=line_h),
+                confidence,
+            ),
+            block=block,
+            line=first_line + i,
         )
     ]

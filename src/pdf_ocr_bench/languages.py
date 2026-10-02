@@ -50,6 +50,9 @@ LANGUAGES: dict[str, Language] = {
     lang.code: lang
     for lang in (
         _lang("eng", "English", "Latin", "en", "en", "en", "en", "en-US"),
+        # Tesseract's Middle English model knows the long s (ſ), which `eng` reads as f; it also
+        # suits 16th-18th century English print. The other engines read it with their English model.
+        _lang("enm", "English (historical, long s)", "Latin", "en", "en", "en", "en", "en-US"),
         _lang("deu", "German", "Latin", "de", "de", "latin", "de", "de-DE"),
         _lang("deu_frak", "German (Fraktur)", "Latin", "de", "de", "latin", "de", "de-DE", _FRAKTUR_MODELS, _FRAKTUR_PACKAGES),
         _lang("frk", "Fraktur", "Latin", "de", "de", "latin", "de", "de-DE", _FRAKTUR_MODELS, _FRAKTUR_PACKAGES),

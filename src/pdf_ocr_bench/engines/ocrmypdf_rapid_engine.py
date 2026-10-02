@@ -8,8 +8,9 @@ from .ocrmypdf_engine import OcrmypdfEngine
 from .rapidocr_engine import FAMILIES, rapidocr_family
 
 # ocrmypdf-rapidocr takes one Tesseract code and maps it to a RapidOCR recognizer. It knows no
-# Fraktur or Latin-language code; any Latin-script code selects the same LATIN recognizer.
-PLUGIN_CODE = {"deu_frak": "deu", "frk": "deu", "lat": "ita"}
+# Fraktur, Latin or historical English code; any Latin-script code selects the same LATIN
+# recognizer, and English its own.
+PLUGIN_CODE = {"deu_frak": "deu", "frk": "deu", "lat": "ita", "enm": "eng"}
 # The plugin maps Russian/Ukrainian to its CYRILLIC recognizer (it has no East Slavic one).
 PLUGIN_FAMILY = {"eslav": "cyrillic"}
 

@@ -5,7 +5,7 @@ import re
 
 from ..languages import Language
 from ..models import BBox, OcrWord, PageImage
-from .base import OcrEngine, Option, Route, split_line, unsupported
+from .base import OcrEngine, Option, Route, split_line, tag, unsupported
 
 # PaddleOCR 3.7 picks the recognizer from `lang`: one multilingual PP-OCRv6 model reads English,
 # Chinese, Japanese and every Latin-script language; the other scripts have PP-OCRv5 models.
@@ -29,6 +29,9 @@ class PaddleOcrEngine(OcrEngine):
     options = {
         "min_score": Option(0.0, "drop text lines recognized with a lower score", minimum=0.0, maximum=1.0),
         "textline_orientation": Option(True, "detect and turn upside-down (180°) text lines"),
+        # The detector otherwise reads the page at full size (up to 4000 px): on a CPU that is
+        # about half of the time per page, and 2048 finds the same lines at ~300 DPI.
+        "det_max_side": Option(0, "shrink the page to this many px (long side) for text detection; recognition still reads the full-size lines (0 = full size, up to 4000)", minimum=0, maximum=8192),
     }
 
     @classmethod
@@ -43,6 +46,9 @@ class PaddleOcrEngine(OcrEngine):
         os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
         from paddleocr import PaddleOCR
 
+        detection = {}
+        if self.opts["det_max_side"]:
+            detection = {"text_det_limit_side_len": self.opts["det_max_side"], "text_det_limit_type": "max"}
         # enable_mkldnn=False: PaddlePaddle 3.x oneDNN kernels crash on CPU
         # ("ConvertPirAttribute2RuntimeAttribute not support").
         self._ocr = PaddleOCR(
@@ -53,6 +59,7 @@ class PaddleOcrEngine(OcrEngine):
             text_rec_score_thresh=self.opts["min_score"],
             return_word_box=True,
             enable_mkldnn=False,
+            **detection,
         )
 
     def ocr_page(self, image: PageImage, lang: str) -> list[OcrWord]:
@@ -65,8 +72,8 @@ class PaddleOcrEngine(OcrEngine):
         regions = r.get("text_word_region") or [None] * len(r["rec_texts"])
         return [
             word
-            for (text, score, poly), frags, regs in zip(lines, fragments, regions)
-            for word in self._line_words(text, float(score), poly, frags, regs, image)
+            for line, ((text, score, poly), frags, regs) in enumerate(zip(lines, fragments, regions))
+            for word in tag(self._line_words(text, float(score), poly, frags, regs, image), line=line)
         ]
 
     @staticmethod

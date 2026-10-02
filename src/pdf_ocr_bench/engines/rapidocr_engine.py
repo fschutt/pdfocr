@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from ..languages import Language
 from ..models import BBox, OcrWord, PageImage
-from .base import OcrEngine, Option, Route, split_line, unsupported
+from .base import OcrEngine, Option, Route, split_line, tag, unsupported
 
 # Recognizer family -> (Rec.lang_type, Rec.ocr_version, Rec.model_type) that RapidOCR 3.9 ships.
 # PP-OCRv6 "small" only takes ch/en/japan/chinese_cht; the other scripts are PP-OCRv5 mobile.
@@ -70,8 +70,8 @@ class RapidOcrEngine(OcrEngine):
         word_lines = out.word_results or [()] * len(out.txts)
         return [
             word
-            for (box, text, score), words in zip(lines, word_lines)
-            for word in self._line_words(box, text, float(score), words, image)
+            for line, ((box, text, score), words) in enumerate(zip(lines, word_lines))
+            for word in tag(self._line_words(box, text, float(score), words, image), line=line)
         ]
 
     @staticmethod

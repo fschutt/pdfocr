@@ -44,6 +44,7 @@ def test_engines_get_defaults_plus_overrides():
     engine = ENGINES["tesseract"](Route(lang="eng"), options={"psm": 6})
     assert engine.opts == {"psm": 6}
     assert ENGINES["rapidocr"](Route(lang="en")).opts == {"min_score": 0.5, "text_orientation": True}
+    assert ENGINES["paddleocr"](Route(lang="en"), options={"det_max_side": 2048}).opts["det_max_side"] == 2048
     with pytest.raises(ValueError, match="unknown option"):
         ENGINES["surya"](Route(), options={"level": "fast"})
 

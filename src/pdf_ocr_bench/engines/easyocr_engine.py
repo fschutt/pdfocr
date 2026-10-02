@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from ..languages import Language
 from ..models import BBox, OcrWord, PageImage
-from .base import OcrEngine, Option, Route, split_line, unsupported
+from .base import OcrEngine, Option, Route, split_line, tag, unsupported
 
 # EasyOCR has one recognizer per script group. Latin languages mix freely; a Cyrillic or
 # Arabic language combines with others of its script and English; Chinese, Japanese and
@@ -40,6 +40,6 @@ class EasyOcrEngine(OcrEngine):
         detections = self._reader.readtext(str(image.path), detail=1, paragraph=False, decoder=self.opts["decoder"])
         return [
             word
-            for points, text, conf in detections
-            for word in split_line(text, BBox.from_points(points, image.width_px, image.height_px), float(conf))
+            for line, (points, text, conf) in enumerate(detections)
+            for word in tag(split_line(text, BBox.from_points(points, image.width_px, image.height_px), float(conf)), line=line)
         ]
