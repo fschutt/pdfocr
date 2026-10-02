@@ -240,6 +240,41 @@ engine that is not selected is rejected. `pdf-ocr-bench engines` and the end of
 
 The report records every engine's effective parameters next to its model.
 
+## Rebuilding a page: layout, text and structure
+
+`pdf-ocr-bench reconstruct` rebuilds scanned pages as structured HTML, as close to the printed
+page as it can: columns, paragraphs, marginal notes beside their lines, drop capitals, running
+heads, footnotes, and the pictures cut out of the scan.
+
+```sh
+pdf-ocr-bench reconstruct scan.pdf -o out --pages 1-20 --lang enm \
+    --semantic-context "An English translation of Calmet's Dictionary of the Holy Bible, printed 1732"
+cargo run --release --manifest-path html2pdf/Cargo.toml -- out/pages.zip -o out.pdf
+```
+
+1. **Render** each page at the resolution of its scan, and at 3/4 of it for Vision (scaling a
+   black-and-white scan down smooths its edges, which Vision reads much better).
+2. **Layout from the pixels** (`page_layout.py`, OpenCV): the running head, text columns,
+   marginal-note strips, footnotes, other text blocks (titles, captions), pictures and drop
+   capitals. Columns are cut at gutters, the x ranges only a few words cross; the lines that do
+   cross one (a running head, a centred title, a footnote) become full-width blocks first.
+3. **Text**: macOS Vision reads the lines (on the device); every word goes to its zone.
+4. **Pictures** are cut out of the scan as PNGs and placed as images.
+5. **Structure**: an LLM (`claude -p`, `--model sonnet`, `--agents` pages at once) gets the zones
+   with their OCR lines and the scan (reduced, and as 8 full-resolution tiles), plus
+   `--semantic-context`. It answers which lines make a paragraph, a note or a heading line, the
+   corrected text (long s, misread letters), and drop capitals. `--no-llm` uses a heuristic
+   from the line geometry instead (nothing is uploaded). `--zoom` lets the model crop the scan.
+6. **HTML**: every paragraph at the place of its first line, as wide as its column, justified,
+   in Times at one size per column (the size at which it wraps to its original number of
+   lines); notes at one size beside the line they annotate; a drop capital as a letter with
+   the lines beside it narrowed. Then a render-and-measure loop (`html2pdf --layout-report`)
+   sets smaller whatever still runs into the block below.
+
+`out/work/page_NNN/` keeps each page's renders, `layout.png` (the zones drawn on the page),
+`layout.json`, `lines.json` and the LLM's prompt and answer; an answer is reused as long as the
+page's zones and lines are unchanged. Without zoom a page is one request of about 0.4 MB.
+
 ## Correcting with an LLM
 
 `scripts/llm_correct.py` proofreads a result page by page with Claude (`claude -p`, so a Claude

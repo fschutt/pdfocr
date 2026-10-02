@@ -95,6 +95,43 @@ def run_cmd(input_pdf, output_dir, engines, lang, dpi, pages, preprocess, engine
         sys.exit(1)
 
 
+@main.command("reconstruct")
+@click.argument("input_pdf", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("-o", "--output-dir", type=click.Path(file_okay=False, path_type=Path), default=Path("reconstructed"), show_default=True)
+@click.option("--pages", default=None, help=PAGES_HELP)
+@click.option("--lang", default="eng", show_default=True, help=LANG_HELP)
+@click.option("--semantic-context", default="", help="What the book is, for the LLM, e.g. 'an English dictionary of the Bible, printed 1732'")
+@click.option("--model", default="sonnet", show_default=True, help="claude -p model for the structure")
+@click.option("--agents", type=click.IntRange(1), default=4, show_default=True, help="pages asked at once")
+@click.option("--no-llm", is_flag=True, help="structure from the line geometry only (no upload)")
+@click.option("--zoom", is_flag=True, help="let the LLM crop and zoom into the scan (several MB of upload per page)")
+@click.option("--fit-rounds", type=click.IntRange(0), default=6, show_default=True, help="render-and-shrink rounds (needs html2pdf)")
+@click.option("-v", "--verbose", is_flag=True)
+def reconstruct_cmd(input_pdf, output_dir, pages, lang, semantic_context, model, agents, no_llm, zoom, fit_rounds, verbose) -> None:
+    """Rebuild scanned pages as structured HTML: OpenCV layout, macOS Vision text, an LLM's structure.
+
+    Writes OUTPUT_DIR/pages.zip for html2pdf (columns, notes beside their lines, drop capitals,
+    the pictures cut out of the scan) and OUTPUT_DIR/work/ (each page's layout, lines, LLM answer).
+    """
+    from .html_output.renderer import page_count
+    from .languages import html_lang
+    from .pipeline import parse_page_range
+    from .reconstruct import reconstruct
+
+    setup_logging(verbose)
+    try:
+        check_page_spec(pages)
+        languages = parse_languages(lang)
+        selected = parse_page_range(pages, page_count(input_pdf))
+    except (ValueError, InputError) as exc:
+        raise click.UsageError(str(exc)) from exc
+    route = ENGINES["macos_vision"].preflight(ENGINES["macos_vision"].route(languages))
+    if not route.ok:
+        raise click.UsageError(f"reconstruct reads the text with macOS Vision: {route.unsupported}")
+    reconstruct(input_pdf, output_dir, selected, route.lang, html_lang(languages), semantic_context,
+                llm=not no_llm, model=model, agents=agents, fit_rounds=fit_rounds, zoom=zoom)
+
+
 @main.command("check")
 @click.option("-e", "--engines", default="all", show_default=True, help=ENGINES_HELP)
 @click.option("--lang", default="eng", show_default=True, help=LANG_HELP)
