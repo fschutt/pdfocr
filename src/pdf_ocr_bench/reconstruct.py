@@ -180,7 +180,7 @@ def zone_lines(layout: PageLayout, image: Path, engine, work: Path) -> list[Line
 
 
 def recover_missed(lines: list[Line], layout: PageLayout, image: Path, engine, work: Path,
-                   max_strips: int = 12) -> list[Line]:
+                   max_strips: int = 60) -> list[Line]:
     """Lines Vision left out of the whole page, read again from a strip of the page around them.
 
     Vision sometimes skips a line (an italic line under a handwritten mark, two lines between
