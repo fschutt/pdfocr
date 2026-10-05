@@ -111,10 +111,13 @@ def run_cmd(input_pdf, output_dir, engines, lang, dpi, pages, preprocess, engine
 @click.option("--learn-from", type=click.Path(exists=True, file_okay=False, path_type=Path), default=None,
               help="an earlier reconstruct output (e.g. a larger model on the first pages): its most frequent "
                    "corrections and one worked page go into the model's instructions")
+@click.option("--redo", default=None, metavar="PAGES",
+              help='pages whose kept LLM answers are dropped and asked for again, e.g. "243,619" (the run still covers --pages)')
+@click.option("--fresh-layout", is_flag=True, help="render, analyse and read every page again (else a page prepared by the same code is reused)")
 @click.option("--thinking/--no-thinking", default=True, show_default=True,
               help="let the model think before it answers (--no-thinking: much faster, e.g. with haiku)")
 @click.option("-v", "--verbose", is_flag=True)
-def reconstruct_cmd(input_pdf, output_dir, pages, lang, semantic_context, model, agents, workers, no_llm, zoom, fit_rounds, learn_from, thinking, verbose) -> None:
+def reconstruct_cmd(input_pdf, output_dir, pages, lang, semantic_context, model, agents, workers, no_llm, zoom, fit_rounds, learn_from, redo, fresh_layout, thinking, verbose) -> None:
     """Rebuild scanned pages as structured HTML: OpenCV layout, macOS Vision text, an LLM's structure.
 
     Writes OUTPUT_DIR/pages.zip for html2pdf (columns, notes beside their lines, drop capitals,
@@ -130,6 +133,7 @@ def reconstruct_cmd(input_pdf, output_dir, pages, lang, semantic_context, model,
         check_page_spec(pages)
         languages = parse_languages(lang)
         selected = parse_page_range(pages, page_count(input_pdf))
+        redo_pages = set(parse_page_range(redo, page_count(input_pdf))) if redo else set()
     except (ValueError, InputError) as exc:
         raise click.UsageError(str(exc)) from exc
     route = ENGINES["macos_vision"].preflight(ENGINES["macos_vision"].route(languages))
@@ -144,7 +148,7 @@ def reconstruct_cmd(input_pdf, output_dir, pages, lang, semantic_context, model,
             raise click.UsageError(f"--learn-from {learn_from}: no answered pages in its work/ directory")
     reconstruct(input_pdf, output_dir, selected, route.lang, html_lang(languages), semantic_context,
                 llm=not no_llm, model=model, agents=agents, fit_rounds=fit_rounds, zoom=zoom, guide=guide,
-                thinking=thinking, workers=workers)
+                thinking=thinking, workers=workers, redo=redo_pages, fresh_layout=fresh_layout)
 
 
 @main.command("check")

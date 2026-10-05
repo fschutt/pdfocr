@@ -199,15 +199,16 @@ class Structurer:
         self.jobs: dict[int, Future] = {}
         self.limited = threading.Event()
 
-    def submit(self, n: int, r: dict) -> None:
-        self.jobs[n] = self.pool.submit(self._one, r)
+    def submit(self, n: int, r: dict, fresh: bool = False) -> None:
+        """Ask about page `n` (`fresh`: even if an answer is kept)."""
+        self.jobs[n] = self.pool.submit(self._one, r, fresh)
 
-    def _one(self, r: dict):
+    def _one(self, r: dict, fresh: bool = False):
         pw = self.work / r["name"] / "llm"
         pw.mkdir(parents=True, exist_ok=True)
         prompt = page_prompt(r["layout"], r["lines"], self.context)
         key = f"{self.model}\n{self.system}\n{prompt}"
-        same = (pw / "prompt.txt").exists() and (pw / "prompt.txt").read_text(encoding="utf-8") == key
+        same = not fresh and (pw / "prompt.txt").exists() and (pw / "prompt.txt").read_text(encoding="utf-8") == key
         answer, result = (claude_cli.answer_of(pw / "response.jsonl")[0] if same else None), {"num_turns": 0}
         items = to_items(answer, r["lines"], r["layout"]) if answer else None
         for _ in range(2 if items is None else 0):  # asked again once: an answer may stop halfway

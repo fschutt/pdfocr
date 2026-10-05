@@ -700,10 +700,12 @@ def _write_zip(target: Path, metadata: dict, pages_meta: list[dict], out: Path) 
         z.writestr("metadata.json", json.dumps(metadata, indent=2))
         for p in pages_meta:
             z.write(out / p["html"], p["html"])
-        names = {p["html"].removesuffix(".html") for p in pages_meta}
-        for picture in sorted((out / "pictures").glob("*.png")) if (out / "pictures").exists() else []:
-            if picture.name.rsplit("_", 1)[0] in names:  # page_NNN_k.png: only the zip's pages
-                z.write(picture, f"pictures/{picture.name}")
+        used = set()  # the pictures the pages show (a capital no paragraph opens with is left out)
+        for p in pages_meta:
+            used.update(re.findall(r'<img class="pic" src="(pictures/[^"]+)"', (out / p["html"]).read_text(encoding="utf-8")))
+        for rel in sorted(used):
+            if (out / rel).exists():
+                z.write(out / rel, rel)
 
 
 def fit_round(target: Path, page_blocks: dict[int, list[Block]], pages_meta: list[dict], work: Path) -> dict[int, int]:
@@ -756,10 +758,33 @@ def fit_round(target: Path, page_blocks: dict[int, list[Block]], pages_meta: lis
 _WORKER: dict = {}
 
 
-def prepare_page(pdf_path: Path, n: int, out: Path, lang: tuple[str, ...]) -> dict:
+def prep_key(pdf_path: Path, lang: tuple[str, ...]) -> str:
+    """What steps 1-4 of a page depend on: the PDF, the languages, and this code."""
+    import hashlib
+
+    here = Path(__file__).resolve().parent
+    h = hashlib.sha1(f"{pdf_path.resolve()}|{pdf_path.stat().st_size}|{lang}".encode())
+    for source in ("reconstruct.py", "page_layout.py"):
+        h.update((here / source).read_bytes())
+    return h.hexdigest()
+
+
+def prepare_page(pdf_path: Path, n: int, out: Path, lang: tuple[str, ...], key: str = "") -> dict:
     """Steps 1-4 for one page (in a worker process): renders, layout, Vision's lines (and the ones
-    it skipped, read again from strips), the pictures. Writes work/page_NNN/."""
+    it skipped, read again from strips), the pictures. Writes work/page_NNN/, and keeps the result
+    (work/page_NNN/prepared.pkl) for the next run with the same `key`."""
+    import pickle
+
     import pypdfium2 as pdfium
+
+    cache = out / "work" / f"page_{n + 1:03d}" / "prepared.pkl"
+    if key and cache.exists():
+        try:
+            saved = pickle.loads(cache.read_bytes())
+            if saved.get("key") == key and all((out / rel).exists() for rel in saved["result"]["pictures"].values()):
+                return {**saved["result"], "seconds": 0.0, "cached": True}
+        except Exception:
+            pass  # unreadable: prepared again
 
     if _WORKER.get("path") != pdf_path:
         from .engines import ENGINES
@@ -791,8 +816,11 @@ def prepare_page(pdf_path: Path, n: int, out: Path, lang: tuple[str, ...]) -> di
     pictures = clip_pictures(pw / "native.png", layout, out, name)
     (pw / "layout.json").write_text(json.dumps(layout.to_dict(), indent=1))
     (pw / "lines.json").write_text(json.dumps([{**asdict(l), "box": asdict(l.box), "words": None} for l in lines], indent=1, ensure_ascii=False))
-    return {"name": name, "layout": layout, "lines": lines, "pictures": pictures, "size": (width_pt, height_pt),
-            "dpi": dpi, "recovered": len(recovered), "seconds": time.perf_counter() - t}
+    result = {"name": name, "layout": layout, "lines": lines, "pictures": pictures, "size": (width_pt, height_pt),
+              "dpi": dpi, "recovered": len(recovered), "seconds": time.perf_counter() - t}
+    if key:
+        cache.write_bytes(pickle.dumps({"key": key, "result": result}))
+    return result
 
 
 def scan_only_page(pdf_path: Path, n: int, out: Path) -> dict:
@@ -822,7 +850,7 @@ def scan_only_page(pdf_path: Path, n: int, out: Path) -> dict:
 def reconstruct(pdf_path: Path, out: Path, pages: list[int], lang: tuple[str, ...], html_lang: str,
                 semantic_context: str = "", llm: bool = True, model: str = "sonnet", agents: int = 4,
                 fit_rounds: int = 10, zoom: bool = False, guide: str = "", thinking: bool = True,
-                workers: int = 4) -> Path:
+                workers: int = 4, redo: set[int] | None = None, fresh_layout: bool = False) -> Path:
     from concurrent.futures import ProcessPoolExecutor, as_completed
 
     work = out / "work"
@@ -836,7 +864,8 @@ def reconstruct(pdf_path: Path, out: Path, pages: list[int], lang: tuple[str, ..
         # each page goes to the model as soon as it is read, while the workers read the next ones
         structurer = Structurer(work, semantic_context, model, agents, zoom, guide, thinking)
     with ProcessPoolExecutor(max_workers=max(1, workers)) as pool:
-        jobs = {pool.submit(prepare_page, pdf_path.resolve(), n, out, lang): n for n in pages}
+        key = "" if fresh_layout else prep_key(pdf_path, lang)
+        jobs = {pool.submit(prepare_page, pdf_path.resolve(), n, out, lang, key): n for n in pages}
         for done, job in enumerate(as_completed(jobs), 1):
             n = jobs[job]
             try:
@@ -846,10 +875,11 @@ def reconstruct(pdf_path: Path, out: Path, pages: list[int], lang: tuple[str, ..
                 results[n] = scan_only_page(pdf_path, n, out)
                 continue
             again = f" ({r['recovered']} read again from a strip)" if r["recovered"] else ""
+            took = "as before" if r.get("cached") else f"{r['seconds']:.1f}s"
             log.info(f"[{done}/{len(pages)}] {r['name']}: {r['dpi']:.0f} dpi, {len(r['layout'].zones)} zones, "
-                     f"{len(r['lines'])} lines{again}, {len(r['pictures'])} pictures, {r['seconds']:.1f}s")
+                     f"{len(r['lines'])} lines{again}, {len(r['pictures'])} pictures, {took}")
             if structurer is not None:
-                structurer.submit(n, r)
+                structurer.submit(n, r, fresh=n in (redo or ()))
 
     structures: dict[int, list[Item]] = structurer.collect() if structurer is not None else {}
     for n, r in results.items():
@@ -860,14 +890,28 @@ def reconstruct(pdf_path: Path, out: Path, pages: list[int], lang: tuple[str, ..
     for n, r in sorted(results.items()):
         width_pt, height_pt = r["size"]
         page_blocks[n] = build_blocks(structures[n], r["lines"], r["layout"], r["pictures"], width_pt, height_pt)
-        used = {b.picture for b in page_blocks[n] if b.picture}
-        for rel in set(r["pictures"].values()) - used:  # a capital no paragraph opens with
-            (out / rel).unlink(missing_ok=True)
         pages_meta.append({"page_num": n, "html": f"{r['name']}.html", "width_pt": width_pt, "height_pt": height_pt,
                            "width_px": r["layout"].width, "height_px": r["layout"].height})
     metadata = {"engine": "reconstruct" + ("+" + model if llm else ""), "page_count": len(pages_meta), "pages": pages_meta}
     target = out / "pages.zip"
-    todo = list(pages_meta)  # the pages to (re)write: all, then those whose blocks were set smaller
+    # a page whose blocks are as in the last run gets the sizes the fit loop found then
+    import hashlib
+
+    start_html = {}
+    todo = []  # the pages to (re)write and fit: those not fitted before, then those set smaller
+    for p in pages_meta:
+        blocks = page_blocks[p["page_num"]]
+        start_html[p["page_num"]] = hashlib.sha1(blocks_html(blocks, p["width_pt"], p["height_pt"], html_lang).encode()).hexdigest()
+        fitted = work / p["html"].removesuffix(".html") / "fit.json"
+        saved = json.loads(fitted.read_text()) if fitted.exists() else {}
+        sizes = saved.get("sizes", [])
+        if saved.get("key") == start_html[p["page_num"]] and len(sizes) == len(blocks) and (out / p["html"]).exists():
+            for b, (size, line_h) in zip(blocks, sizes):
+                b.size, b.line_h = size, line_h
+        else:
+            todo.append(p)
+    if len(todo) < len(pages_meta):
+        log.info(f"{len(pages_meta) - len(todo)} pages are set as fitted before; {len(todo)} to fit")
     for round_ in range(fit_rounds + 1):
         for p in todo:
             width_pt, height_pt = p["width_pt"], p["height_pt"]
@@ -880,6 +924,9 @@ def reconstruct(pdf_path: Path, out: Path, pages: list[int], lang: tuple[str, ..
         log.info(f"Fit round {round_ + 1}: {sum(changed.values())} blocks on {len(changed)} of {len(todo)} pages "
                  "ran past the next block and were set smaller")
         todo = [p for p in pages_meta if p["page_num"] in changed]
+    for p in pages_meta:
+        (work / p["html"].removesuffix(".html") / "fit.json").write_text(json.dumps(
+            {"key": start_html[p["page_num"]], "sizes": [[b.size, b.line_h] for b in page_blocks[p["page_num"]]]}))
     _write_zip(target, metadata, pages_meta, out)
     log.info(f"Wrote {target} ({len(pages_meta)} pages) in {time.perf_counter() - start:.0f}s")
     if HTML2PDF.exists():

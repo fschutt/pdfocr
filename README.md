@@ -289,9 +289,13 @@ run's most frequent corrections (OCR words that are no words) and one of its pag
 through, to the model's instructions.
 
 `out/work/page_NNN/` keeps each page's renders, `layout.png` (the zones drawn on the page),
-`layout.json`, `lines.json` and the LLM's prompt and answer; an answer is reused as long as the
-page's zones and lines (and the model and instructions) are unchanged, so a run that stopped is
-continued by running it again. When the subscription's usage limit is hit, no further pages are
+`layout.json`, `lines.json`, the LLM's prompt and answer, `prepared.pkl` and `fit.json`. Running
+the same command again continues a run that stopped and redoes only what changed: a page is
+prepared again (steps 1-4) only when the code of those steps changed (`--fresh-layout`: always),
+an answer is reused as long as the page's zones and lines (and the model and instructions) are
+unchanged, and a page whose blocks are as before keeps the sizes the fit loop found.
+`--redo 243,619` drops the kept answers of those pages and asks again; the output still covers
+all of `--pages`. When the subscription's usage limit is hit, no further pages are
 sent; they get the heuristic structure until the next run. An answer that leaves out more than
 15% of the page's text (the model stopped halfway) is asked for once more. A page is one request of about
 0.5 MB of images, sent twice (the answer, and the structured-output turn): about 1 MB.
