@@ -113,7 +113,7 @@ def to_items(answer: dict, lines: list, layout: PageLayout):
         zone = a.get("zone") if a.get("zone") in zones else (known[ids[0]].zone if ids else "")
         items.append(Item(zone=zone, text=text, lines=ids, kind=a.get("kind", "paragraph"),
                           drop_cap=(a.get("drop_cap") or "")[:1], align=a.get("align") or "justify",
-                          italic=bool(a.get("italic"))))
+                          italic=bool(a.get("italic")), label=str(a.get("zone") or "")))
     # lines the answer left out: fine when they are a little junk, not when text went missing
     missing = sum(len(l.text) for i, l in known.items() if i not in used)
     total = sum(len(l.text) for l in lines) or 1

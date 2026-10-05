@@ -228,7 +228,8 @@ def test_a_note_without_lines_of_its_own_is_placed_by_its_words_in_the_column_ma
     assert notes[0].y == pytest.approx(100) and notes[1].y == pytest.approx(300)
     assert all(n.x < 200 and n.x + n.w <= 250 for n in notes)  # in the margin, left of the text
     paras = [b for b in blocks if b.item.kind == "paragraph"]
-    assert all(p.x >= max(n.x + n.w for n in notes) for p in paras)  # the text starts beside them
+    # each paragraph clear of the note beside it (notes placed by their words make no column margin)
+    assert paras[0].x >= notes[0].x + notes[0].w and paras[1].x >= notes[1].x + notes[1].w
 
 
 def test_type_sizes_of_a_page_are_grouped():
@@ -238,11 +239,3 @@ def test_type_sizes_of_a_page_are_grouped():
     est = [(40.0, 20), (39.2, 15), (41.0, 18), (28.5, 2), (29.6, 1), (30.1, 2), (47.0, 2)]
     assert size_levels(est) == [29.6, 40.0, 47.0]
 
-
-def test_an_area_with_footnotes_in_it_has_two_sizes():
-    from pdf_ocr_bench.reconstruct import split_sizes
-
-    body = [(43.5, 15, "a"), (45.2, 21, "b"), (43.5, 17, "c"), (42.7, 1, "d")]
-    foot = [(35.2, 1, "e"), (36.8, 1, "f"), (38.5, 2, "g"), (36.8, 2, "h")]
-    groups = split_sizes(body + foot)
-    assert [sorted(k for *_, k in g) for g in groups] == [["e", "f", "g", "h"], ["a", "b", "c", "d"]]

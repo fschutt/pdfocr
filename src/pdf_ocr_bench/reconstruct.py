@@ -71,6 +71,7 @@ class Item:
     drop_cap: str = ""  # the initial letter when the paragraph opens with a drop capital
     align: str = "justify"  # justify | left | center | right
     italic: bool = False
+    label: str = ""  # the zone the model named (footnotes0: a footnote, whatever zone it stands in)
 
 
 # --- 1. rendering ----------------------------------------------------------------------------
@@ -384,6 +385,7 @@ class Block:
     fit: tuple | None = None  # (lines in the scan, size to start from, line pitch) for sizing
     start_size: float = 0.0  # the size before the fit loop
     level: float = 0.0  # the page's type size it was set at (its group in the fit loop); 0: its own
+    area: str = ""  # text, notes, footnotes (Hebrew apart): what measured its size
     letter_spacing: float = 0.0  # em
     pitch: float = 0.0  # the scan's line pitch, pt: the line height whenever the text is smaller
 
@@ -633,26 +635,6 @@ def measured_em(item: Item, group: list[Line], ink, px: float) -> float | None:
     return float(np.median(heights)) * px / _ratio_of(item.text)
 
 
-def split_sizes(measures: list[tuple[float, int, object]], min_ratio: float = 1.12) -> list[list]:
-    """Measures (size, weight, key) of one area as groups of one type size: split at the gap that
-    leaves the tightest groups, when their sizes differ by `min_ratio` or more; again inside each."""
-    import math
-
-    ms = sorted(measures, key=lambda m: m[0])
-    best = None
-    for i in range(1, len(ms)):
-        lo, hi = ms[:i], ms[i:]
-        mlo, mhi = _weighted_median([(m[0], m[1]) for m in lo]), _weighted_median([(m[0], m[1]) for m in hi])
-        if mhi / mlo < min_ratio:
-            continue
-        spread = sum(m[1] * abs(math.log(m[0] / mlo)) for m in lo) + sum(m[1] * abs(math.log(m[0] / mhi)) for m in hi)
-        if best is None or spread < best[0]:
-            best = (spread, i)
-    if best is None:
-        return [ms]
-    return split_sizes(ms[:best[1]], min_ratio) + split_sizes(ms[best[1]:], min_ratio)
-
-
 def size_levels(estimates: list[tuple[float, int]], tol: float = 0.1) -> list[float]:
     """The type sizes of a page: size estimates (with their weights, lines) that lie within `tol`
     of the next make one size, the weighted median of its estimates."""
@@ -704,8 +686,10 @@ def page_fonts(blocks: list[Block], layout: PageLayout, width_pt: float) -> dict
         if b.item is None or not b.level:
             continue
         entry = sizes.setdefault(round(b.level, 2), {"measured_pt": round(b.level, 2), "set_pt": round(b.size, 2), "areas": {}})
-        key = f"{b.item.zone} {b.item.kind}"
-        entry["areas"][key] = entry["areas"].get(key, 0) + 1
+        area = entry["areas"].setdefault(b.area, {"blocks": 0, "zones": []})
+        area["blocks"] += 1
+        if b.item.zone not in area["zones"]:
+            area["zones"].append(b.item.zone)
     columns = [{"zone": z.id, "x0_pt": round(z.box.x0 * px, 1), "x1_pt": round(z.box.x1 * px, 1)}
                for z in layout.zones if z.role == "column"]
     return {"sizes": sorted(sizes.values(), key=lambda e: -e["measured_pt"]), "columns": columns}
@@ -737,6 +721,7 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
     # margin notes the layout left inside a column: the text beside them starts right of (ends
     # left of) them, so a paragraph does not run under its note
     inner_notes = []
+    seen_notes = []  # those with OCR lines of their own (not placed by their words)
     for it in items:
         g = [by_id[i] for i in it.lines if i in by_id]
         z = zones.get(_majority_zone(g, it.zone)) if g else None
@@ -748,11 +733,19 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
         # narrow, at an edge of its column (a footnote under the text is neither)
         if nx1 - nx0 < 0.3 * z.box.w and (nx0 < z.box.x0 + 0.1 * z.box.w or nx1 > z.box.x1 - 0.1 * z.box.w):
             inner_notes.append((nx0, ny0, nx1, ny1, z.id, "left" if (nx0 + nx1) / 2 < z.box.x0 + 0.5 * z.box.w else "right"))
+            if not g[0].id.startswith("X"):
+                seen_notes.append(inner_notes[-1])
     # a column's note margin: where its notes typically start and end (Vision may have read only
     # a fragment of one note, "3. 4" of "Numb. xix. 3, 4, 5, 6.")
+    # (from notes the OCR read there: one on the column's outer side, two on its inner side;
+    # a note placed by its words alone may stand anywhere in the text)
     margin_of: dict[tuple[str, str], tuple[float, float]] = {}
-    for key in {(nt[4], nt[5]) for nt in inner_notes}:
-        mine = [nt for nt in inner_notes if (nt[4], nt[5]) == key]
+    for key in {(nt[4], nt[5]) for nt in seen_notes}:
+        mine = [nt for nt in seen_notes if (nt[4], nt[5]) == key]
+        z = zones[key[0]]
+        outer = key[1] == ("left" if z.box.x0 + z.box.w / 2 < layout.width / 2 else "right")
+        if len(mine) < (1 if outer else 2):
+            continue
         x0s, x1s = sorted(nt[0] for nt in mine), sorted(nt[2] for nt in mine)
         margin_of[key] = (x0s[len(x0s) // 2], x1s[len(x1s) // 2])
     inner_notes = [(m[0], nt[1], m[1], nt[3], nt[4], nt[5]) if (m := margin_of.get((nt[4], nt[5]))) else nt
@@ -930,45 +923,36 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
         b.size = fit_size(plain(b.item.text), 0.97 * b.w, max(n, room_lines), size0, _times(b.item.italic), b.indent)
         b.line_h = max(pitch, b.size)
 
-    # the page's type sizes, by area (a zone's text, its margin notes, its footnotes; Hebrew apart):
-    # each block measured in the scan, an area at the median of its blocks, areas whose sizes are
-    # within 6% one size; every block at its area's size (headings, capitals: their own)
+    # the page's type sizes, by area: its text, its margin notes, its footnotes (Hebrew apart), each
+    # at the median of its blocks measured in the scan (a single note measures 30 or 48 pt, by its
+    # figures and numerals; an area's median is steady); areas within 6% are one size. Headings and
+    # capitals keep their own.
     text_blocks = [b for b in blocks if b.item is not None and not b.nowrap and b.item.kind in ("paragraph", "note")]
-    area_of = {id(b): (b.item.zone, b.item.kind, _ratio_of(b.item.text) == HEBREW_LETTER) for b in text_blocks}
-    own: dict[int, tuple[float, int]] = {}
+
+    def role(b: Block) -> str:
+        zone = zones.get(b.item.zone)
+        if b.item.label.startswith("footnotes") or (zone is not None and zone.role == "footnotes"):
+            return "footnotes"
+        return "notes" if b.item.kind == "note" else "text"
+
+    area_of = {id(b): (role(b), _ratio_of(b.item.text) == HEBREW_LETTER) for b in text_blocks}
+    measures: dict[tuple, list[tuple[float, int]]] = {}
     for b in text_blocks:
         em = measured_em(b.item, [by_id[i] for i in b.item.lines if i in by_id], ink, px)
         if em:
-            own[id(b)] = (em, max(1, len(b.item.lines)))
-    # an area may hold two sizes (footnotes the model called paragraphs, in a zone with the
-    # text; a verse quoted in smaller type): its blocks' measures split into groups (`split_sizes`)
-    size_of: dict[int, float] = {}
-    area_size: dict[tuple, float] = {}  # the area's main size (most lines), for blocks not measured
-    weights: list[tuple[float, int]] = []
-    for area in {area_of[id(b)] for b in text_blocks}:
-        mine = [(own[id(b)][0], own[id(b)][1], id(b)) for b in text_blocks if area_of[id(b)] == area and id(b) in own]
-        groups = split_sizes(mine) if mine else []
-        for g in groups:
-            size = _weighted_median([(em, w) for em, w, _ in g])
-            weights.append((size, sum(w for _, w, _ in g)))
-            for _, _, key in g:
-                size_of[key] = size
-        if groups:
-            main = max(groups, key=lambda g: sum(w for _, w, _ in g))
-            area_size[area] = _weighted_median([(em, w) for em, w, _ in main])
-    levels = size_levels(weights, tol=0.06)
+            measures.setdefault(area_of[id(b)], []).append((em, max(1, len(b.item.lines))))
+    area_size = {area: _weighted_median(sorted(m)) for area, m in measures.items()}
+    levels = size_levels([(size, sum(w for _, w in measures[area])) for area, size in area_size.items()], tol=0.06)
     for b in text_blocks:
         area = area_of[id(b)]
-        if id(b) in size_of:
-            size = size_of[id(b)]
-        elif area in area_size:
+        if area in area_size:
             size = area_size[area]
-        else:  # nothing measured in its area: the size of its kind (and script) elsewhere on the page
-            kin = [sz for (z, kind, heb), sz in area_size.items() if kind == area[1] and heb == area[2]]
-            if not kin:
-                continue
-            size = sorted(kin)[len(kin) // 2]
+        elif (area[0], False) in area_size:  # a Hebrew note with nothing measured: as the notes
+            size = area_size[(area[0], False)]
+        else:
+            continue
         b.size = b.level = min(levels, key=lambda level: abs(level - size))
+        b.area = area[0] + (" (Hebrew)" if area[1] else "")
         if b.item.kind == "note":
             b.pitch = 0.0  # a note's line height follows its size
     for b in blocks:
