@@ -690,60 +690,56 @@ def _weighted_median(pairs: list[tuple[float, int]]) -> float:
 
 
 def is_footnote(item: Item, zones: dict) -> bool:
-    """A footnote: the model named a footnote zone for it, or it stands in one."""
+    """A footnote: the model named a footnote zone for it ("footnotes0", "foot"), or it stands in one."""
     zone = zones.get(item.zone)
-    return item.label.startswith("footnotes") or (zone is not None and zone.role == "footnotes")
+    return "foot" in item.label.lower() or (zone is not None and zone.role == "footnotes")
+
+
+def page_zones(layout: PageLayout) -> list[Zone]:
+    """The layout's zones, a note strip as wide as a column of its own band taken for a column (the
+    layout calls a column a note strip when another band of the page is set full width: it
+    compares with the widest column of the page). The model's answer keeps the layout's names."""
+    lh = layout.line_height
+    out = []
+    for z in layout.zones:
+        if z.role == "notes":
+            band = [o for o in layout.zones if o.role in ("column", "notes") and o is not z
+                    and min(o.box.y1, z.box.y1) - max(o.box.y0, z.box.y0) > 0.5 * min(o.box.h, z.box.h)]
+            widest = max([o.box.w for o in band] + [z.box.w])
+            if z.box.w >= 0.45 * widest and z.box.w >= 12 * lh:
+                z = replace(z, role="column")
+        out.append(z)
+    return out
 
 
 def set_footnotes(blocks: list[Block], by_id: dict, lh: float, px: float) -> None:
-    """The footnotes as print sets them: one after another in rows, a long one wrapping to the
-    band's left edge. Each is a block as wide as the band, its first line indented to where it
-    starts in the scan; one whose words are on no line follows the one before it on its row."""
-    foot = [b for b in blocks if b.item is not None and b.item.kind in ("paragraph", "note") and b.item.label.startswith("footnotes")]
+    """The footnotes as one run-in block across the footnote band, in reading order, a wide space
+    between them, at the scan's row pitch: print sets them one after another in rows. (Placed
+    one by one from the OCR they ran into each other: lines the OCR merged across the band,
+    Hebrew it could not read, a word of one footnote found in another.)"""
+    foot = [b for b in blocks if b.item is not None and b.item.kind in ("paragraph", "note") and "foot" in b.item.label.lower()]
     if not foot:
         return
-    starts = {}
-    for b in foot:
-        group = [by_id[i] for i in b.item.lines if i in by_id]
-        words = own_words(b.item.text, group)
-        if not words and group and sum(len(l.text) for l in group) >= 0.5 * len(plain(b.item.text)):
-            # none of its words read as such (Hebrew read as figures): its own line is where it is
-            # (not a line of a stray mark or two, which the OCR may have read anywhere)
-            words = [w for l in group for w in l.words] or [("", l.box) for l in group]
-        if words:
-            top = min(w.y0 for _, w in words)
-            first = [w for _, w in words if w.y0 < top + 0.6 * lh]
-            starts[id(b)] = (min(w.x0 for w in first), top, max(w.x1 for w in first))
-    if not starts:
+    lines = [by_id[i] for b in foot for i in b.item.lines if i in by_id]
+    if not lines:
         return
-    x0 = min(v[0] for v in starts.values())
-    x1 = max(max(w.x1 for _, w in own_words(b.item.text, [by_id[i] for i in b.item.lines if i in by_id]) or [(None, Box(0, 0, 0, 0))])
-             for b in foot)
-    x1 = max(x1, max(v[2] for v in starts.values()))
-    # the rows' pitch: the line height of every footnote (a long one runs on in the next row)
-    tops = sorted({round(v[1]) for v in starts.values()})
+    x0, x1 = min(l.box.x0 for l in lines), max(l.box.x1 for l in lines)
+    top = min(l.box.y0 for l in lines)
+    tops = sorted({l.box.y0 for l in lines})
     rows: list[float] = []
     for t in tops:
         if not rows or t - rows[-1] > 0.5 * lh:
             rows.append(t)
     steps = sorted(b2 - a for a, b2 in zip(rows, rows[1:]))
-    pitch = steps[len(steps) // 2] * px if steps else 0.0
-    prev = None
-    for b in foot:
-        if id(b) in starts:
-            sx, sy, ex = starts[id(b)]
-        elif prev is not None:  # after the one before it, or at the start of the next row
-            sx, sy, ex = prev[2] + 2 * lh, prev[1], prev[2] + 2 * lh
-            if sx > x1 - 6 * lh:
-                sx, sy, ex = x0, prev[1] + (pitch / px if pitch else 1.2 * lh), x0 + 4 * lh
-        else:
-            continue
-        prev = (sx, sy, ex)
-        b.x, b.w, b.y = x0 * px, (x1 - x0) * px * 1.01, sy * px
-        b.indent = (sx - x0) * px
-        b.align = "left"
-        if pitch:
-            b.pitch = pitch
+    first = foot[0]
+    first.item = replace(first.item, text=" \u2003 ".join(b.item.text for b in foot),
+                         lines=[i for b in foot for i in b.item.lines], kind="paragraph")
+    first.x, first.w, first.y = x0 * px, (x1 - x0) * px * 1.01, top * px
+    first.indent, first.align = 0.0, "left"
+    first.pitch = steps[len(steps) // 2] * px if steps else 0.0
+    first.fit = None
+    for b in foot[1:]:
+        blocks.remove(b)
 
 
 def _follow_size(b: Block) -> None:
@@ -789,10 +785,20 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
     font = _times()
     px = width_pt / layout.width  # pt per native px
     items = [replace(it) for it in items]  # their lines may be set below
+    layout = replace(layout, zones=page_zones(layout))
     made, floating = place_lineless(items, lines, layout)
     lines = lines + made
     by_id = {l.id: l for l in lines}
     zones = {z.id: z for z in layout.zones}
+    # footnotes the model put in a column (the layout may cut the footnote band into columns too):
+    # text that starts below the bottom of the page's main columns
+    main = [z for z in layout.zones if z.role == "column" and z.box.h >= 0.3 * layout.height]
+    if main:
+        foot_top = max(z.box.y1 for z in main) - 0.3 * layout.line_height
+        for it in items:
+            g = [by_id[i] for i in it.lines if i in by_id]
+            if it.kind in ("paragraph", "note") and g and min(l.box.y0 for l in g) >= foot_top and "foot" not in it.label.lower():
+                it.label = "footnotes (below the text)"
 
     def em_of(group: list[Line]) -> float:
         # a Vision line box is cap height + descender, ~1.05 em for this kind of face
@@ -1004,7 +1010,7 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
                  and o.x < b.x + b.w and b.x < o.x + o.w
                  and not (o.item is not None and o.item.kind == "dropcap")]  # a capital stands beside
         b.limit = min([height_pt, *below])
-        if b.item.label.startswith("footnotes"):
+        if "foot" in b.item.label.lower():
             b.limit = height_pt  # a long footnote runs on into the next row, as printed
 
     # size every paragraph to the room it has: as many lines (at the original pitch) as fit down
@@ -1057,7 +1063,7 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
                     levels.append(size)
         b.size = b.level = min(levels, key=lambda level: abs(level - size))
         b.area = area[0] + (" (Hebrew)" if area[1] else "")
-        if b.item.kind == "note" and not b.item.label.startswith("footnotes"):
+        if b.item.kind == "note" and not "foot" in b.item.label.lower():
             b.pitch = 0.0  # a margin note's line height follows its size (footnotes keep their rows')
     for b in blocks:
         _follow_size(b)
@@ -1298,7 +1304,14 @@ def fit_round(target: Path, page_blocks: dict[int, list[Block]], pages_meta: lis
             if rendered["x1"] > block.x + block.w + 0.25 * block.size:
                 # a line wider than its box: a heading, or a word longer than a note's line
                 ratio = min(ratio, block.w / max(rendered["x1"] - block.x, 1.0))
-            if not block.item.label.startswith("footnotes") and any(regions[j].y > block.y for j in measured.get("overlaps", []) if j < len(regions)):
+            if "foot" in block.item.label.lower() and rendered["y1"] - rendered["y0"] < 1.6 * block.line_h:
+                # a footnote of one line runs into the next one on its row
+                start = block.x + block.indent
+                after = [o.x + o.indent for o in regions if o is not block and "foot" in o.item.label.lower()
+                         and abs(o.y - block.y) < 0.5 * block.line_h and o.x + o.indent > start + block.size]
+                if after and rendered["x1"] > min(after) - 0.3 * block.size:
+                    ratio = min(ratio, (min(after) - 0.5 * block.size - start) / max(rendered["x1"] - start, 1.0))
+            if not "foot" in block.item.label.lower() and any(regions[j].y > block.y for j in measured.get("overlaps", []) if j < len(regions)):
                 # its text reaches into the text of a block below (a heading's descenders): a step smaller
                 ratio = min(ratio, 0.97)
             if block.level:

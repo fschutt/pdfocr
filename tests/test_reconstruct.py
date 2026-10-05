@@ -192,10 +192,10 @@ def test_a_paragraph_running_on_into_the_next_column_is_a_block_per_column():
     text = " ".join(["words of the first column here"] * 5 + ["and the end of it here"] * 2)
     items = [Item("column0", text, [l.id for l in left + right]), Item("footnotes0", "a Plin. l. 6.", ["F1"], "note")]
     blocks = [b for b in build_blocks(items, left + right + notes, layout, {}, 1000, 1000) if b.item]
-    parts = [b for b in blocks if b.item.kind == "paragraph"]
+    parts = [b for b in blocks if b.item.kind == "paragraph" and "foot" not in b.item.label]
     assert [round(b.x) for b in parts] == [100, 520] and [b.item.zone for b in parts] == ["column0", "column1"]
     assert parts[1].y == pytest.approx(100) and " ".join(b.item.text for b in parts) == text
-    foot = next(b for b in blocks if b.item.kind == "note")
+    foot = next(b for b in blocks if b.item.text == "a Plin. l. 6.")
     assert foot.w > 100  # as wide as its line, not the 5 px speck of a zone it was labelled with
 
 
