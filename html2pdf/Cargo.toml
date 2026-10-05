@@ -9,7 +9,7 @@ publish = false
 [dependencies]
 # printpdf and azul from their fix branches: column-count across paragraphs (azul#481), the
 # space glyph and one text object per line (printpdf#288/#289), and many layout fixes
-printpdf = { git = "https://github.com/fschutt/printpdf", branch = "azul-codegen-api", features = ["png"] }
+printpdf = { git = "https://github.com/fschutt/printpdf", branch = "fix/html-images-decoded-per-page", features = ["png"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }

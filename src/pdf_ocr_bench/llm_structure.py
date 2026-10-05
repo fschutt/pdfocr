@@ -125,7 +125,7 @@ def to_items(answer: dict, lines: list, layout: PageLayout):
 LIMIT_HIT = re.compile(r"\blimit\b|\bresets?\b", re.I)
 PUNCT = ".,;:!?()[]'\"*"
 WORD = re.compile(r"[A-Za-z][A-Za-z']*")
-MARKS = re.compile(r"</?i>")
+MARKS = re.compile(r"</?(?:i|sup|sub)>")
 
 
 def _word_list() -> set[str]:

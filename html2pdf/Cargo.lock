@@ -143,7 +143,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 [[package]]
 name = "azul-core"
 version = "0.0.16"
-source = "git+https://github.com/fschutt/azul?branch=fix%2Finput-bugs-2026-09-19#0836ecb96a82f67b51e44903210e4239c849e7b7"
+source = "git+https://github.com/fschutt/azul?branch=fix%2Finput-bugs-2026-09-19#b515c112ef39d88ef0265b8beae7a2094593592e"
 dependencies = [
  "azul-css",
  "gl-context-loader",
@@ -154,7 +154,7 @@ dependencies = [
 [[package]]
 name = "azul-css"
 version = "0.0.16"
-source = "git+https://github.com/fschutt/azul?branch=fix%2Finput-bugs-2026-09-19#0836ecb96a82f67b51e44903210e4239c849e7b7"
+source = "git+https://github.com/fschutt/azul?branch=fix%2Finput-bugs-2026-09-19#b515c112ef39d88ef0265b8beae7a2094593592e"
 dependencies = [
  "azul-simplecss",
  "libm",
@@ -163,7 +163,7 @@ dependencies = [
 [[package]]
 name = "azul-layout"
 version = "0.0.16"
-source = "git+https://github.com/fschutt/azul?branch=fix%2Finput-bugs-2026-09-19#0836ecb96a82f67b51e44903210e4239c849e7b7"
+source = "git+https://github.com/fschutt/azul?branch=fix%2Finput-bugs-2026-09-19#b515c112ef39d88ef0265b8beae7a2094593592e"
 dependencies = [
  "allsorts-azul",
  "azul-core",
@@ -882,7 +882,7 @@ checksum = "439ee305def115ba05938db6eb1644ff94165c5ab5e9420d1c1bcedbba909391"
 [[package]]
 name = "printpdf"
 version = "0.12.8"
-source = "git+https://github.com/fschutt/printpdf?branch=azul-codegen-api#84dce8c47850f5fe18012998f9689a7e2f743136"
+source = "git+https://github.com/fschutt/printpdf?branch=fix%2Fhtml-images-decoded-per-page#f5e7444caffa919e81920ead16c50d89d663927a"
 dependencies = [
  "allsorts-azul",
  "azul-core",

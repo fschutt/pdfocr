@@ -168,13 +168,17 @@ def test_italic_marks_survive_splitting_drop_capitals_and_escaping():
     from pdf_ocr_bench.reconstruct import _split_text, clean_marks, drop_first_letter, marked_html, plain
 
     assert clean_marks("a <i>b <i>c</i> d</i> <i></i>e <i>f") == "a <i>b c</i> d e <i>f</i>"
+    assert clean_marks("x<sup><i>1</i></sup> <sup>a<sup>b</sup></sup></sub>") == "x<sup><i>1</i></sup> <sup>ab</sup>"
     assert plain("in <i>Jer.</i> i. 6.") == "in Jer. i. 6."
     assert drop_first_letter("<i>Y</i>OU have", "Y") == "OU have"
     assert drop_first_letter("THE obliging", "T") == "HE obliging"
     lines = [Line("L1", "one two three", Box(0, 0, 1, 1)), Line("L2", "four five", Box(0, 2, 1, 3))]
     first, rest = _split_text("one <i>two three four</i> five", 1, lines)
     assert (first, rest) == ("one <i>two three</i>", "<i>four</i> five")
+    first, rest = _split_text("one <i>two <sup>three four</sup></i> five", 1, lines)
+    assert (first, rest) == ("one <i>two <sup>three</sup></i>", "<i><sup>four</sup></i> five")
     assert marked_html("A & <i>B</i>", italic=False) == "A &amp; <i>B</i>"
+    assert marked_html("Cock<sup>a</sup>", italic=True) == "Cock<sup>a</sup>"
     assert marked_html("<i>Rome</i> & <i>Paris", italic=True) == '<span class="up">Rome</span> &amp; <span class="up">Paris</span>'
 
 
@@ -198,5 +202,5 @@ def test_a_paragraph_running_on_into_the_next_column_is_a_block_per_column():
 def test_other_markup_in_an_answer_is_normalised():
     from pdf_ocr_bench.reconstruct import normalize_markup
 
-    assert normalize_markup("Chester<sup>a</sup>, <em>Job</em> <small>xi.</small> <sup>q</sup>") == "Chesterᵃ, <i>Job</i> xi. q"
+    assert normalize_markup("Chester<sup>a</sup>, <em>Job</em> <small>xi.</small> <SUP class=x>q</SUP>") == "Chester<sup>a</sup>, <i>Job</i> xi. <sup>q</sup>"
     assert normalize_markup('<span class="x">Basil</span><br>Rome') == "Basil Rome"

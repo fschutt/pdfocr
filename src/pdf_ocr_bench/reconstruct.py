@@ -671,7 +671,7 @@ def blocks_html(blocks: list[Block], width_pt: float, height_pt: float, lang: st
 <style>
   * {{ margin: 0; padding: 0; box-sizing: border-box; }}
   .page {{ position: relative; width: {width_pt:.2f}pt; height: {height_pt:.2f}pt; overflow: hidden; }}
-  .region {{ position: absolute; color: #000; font-family: {FONT_FAMILY}; hyphens: auto; -azul-hyphenation-language: {htmlmod.escape(lang)}; }}
+  .region {{ position: absolute; color: #000; font-family: {FONT_FAMILY}; hyphens: auto; }}
   .region p {{ margin: 0; }}
   .region .up {{ font-style: normal; }}
   .pic {{ position: absolute; }}
@@ -692,12 +692,13 @@ def _split_text(text: str, k: int, group: list[Line]) -> tuple[str, str]:
 
 
 def _split_at(text: str, n: int) -> tuple[str, str]:
-    """The first `n` words of `text` and the rest; an <i> that runs across the split is closed in
-    the first part and opened again in the second."""
-    words = text.split()
+    """The first `n` words of `text` and the rest; marks open across the split are closed in the
+    first part and opened again in the second."""
+    words = clean_marks(text).split()
     first, rest = " ".join(words[:n]), " ".join(words[n:])
-    if first.count("<i>") > first.count("</i>"):
-        first, rest = first + "</i>", "<i>" + rest
+    still_open = _open_marks(first)
+    first += "".join(f"</{t}>" for t in reversed(still_open))
+    rest = "".join(f"<{t}>" for t in still_open) + rest
     return clean_marks(first), clean_marks(rest)
 
 
@@ -718,67 +719,81 @@ def words_fitting(words: list[str], width_pt: float, size: float, font, n_lines:
 
 # --- the other style inside a text: <i>...</i> ------------------------------------------------
 
-MARK = re.compile(r"(</?i>)")
+MARKS = ("i", "sup", "sub")
+MARK = re.compile(r"(</?(?:i|sup|sub)>)")
 
 
 def plain(text: str) -> str:
-    """`text` without its <i> marks."""
+    """`text` without its marks."""
     return MARK.sub("", text)
 
 
-SUPERSCRIPT = dict(zip("abcdefghijklmnoprstuvwxyz0123456789ABDEGHIJKLMNOPRTUVW+-=()*†‡§",
-                       "ᵃᵇᶜᵈᵉᶠᵍʰⁱʲᵏˡᵐⁿᵒᵖʳˢᵗᵘᵛʷˣʸᶻ⁰¹²³⁴⁵⁶⁷⁸⁹ᴬᴮᴰᴱᴳᴴᴵᴶᴷᴸᴹᴺᴼᴾᴿᵀᵁⱽᵂ⁺⁻⁼⁽⁾*†‡§"))
 TAG = re.compile(r"<(/?)([a-zA-Z]+)[^<>]*>")
 
 
-def _superscript(m: re.Match) -> str:
-    inner = m.group(1)
-    return "".join(SUPERSCRIPT[c] for c in inner) if inner and all(c in SUPERSCRIPT for c in inner) else inner
-
-
 def normalize_markup(text: str) -> str:
-    """A model's answer as plain text with <i> marks: a raised note letter (<sup>a</sup>) as the
-    superscript letter (azul does not raise <sup> or vertical-align: super), <em> as <i>, other
-    tags dropped with their text kept."""
-    text = re.sub(r"<sup>([^<>]{0,6})</sup>", _superscript, text)
+    """A model's answer as text with <i>, <sup> and <sub> marks: <em> is <i>, other tags are
+    dropped with their text kept."""
     def tag(m: re.Match) -> str:
-        name = m.group(2).lower()
-        if name in ("i", "em"):
-            return f"<{m.group(1)}i>"
+        name = {"em": "i"}.get(m.group(2).lower(), m.group(2).lower())
+        if name in MARKS:
+            return f"<{m.group(1)}{name}>"
         return " " if name == "br" else ""
     return TAG.sub(tag, text)
 
 
-def clean_marks(text: str) -> str:
-    """Only <i>...</i> pairs, balanced, not nested, not empty; anything else is text."""
-    out, inside = [], False
+def _open_marks(text: str) -> list[str]:
+    """The marks still open at the end of balanced-so-far `text`, outermost first."""
+    stack: list[str] = []
     for part in MARK.split(text):
-        if part == "<i>":
-            if not inside:
-                out.append(part)
-            inside = True
-        elif part == "</i>":
-            if inside:
-                out.append(part)
-            inside = False
+        if part.startswith("</") and part[2:-1] in stack:
+            stack = stack[:len(stack) - 1 - stack[::-1].index(part[2:-1])]
+        elif part.startswith("<") and part[1:-1] in MARKS:
+            stack.append(part[1:-1])
+    return stack
+
+
+def clean_marks(text: str) -> str:
+    """Marks balanced (a close without its open dropped; an open never closed closed at the end;
+    nesting kept, <sup><i>1</i></sup>), no empty pairs; anything else is text."""
+    out, stack = [], []
+    for part in MARK.split(text):
+        if part.startswith("</") and part[2:-1] in MARKS:
+            name = part[2:-1]
+            if name not in stack:
+                continue
+            while stack:  # close the marks opened inside it as well
+                top = stack.pop()
+                out.append(f"</{top}>")
+                if top == name:
+                    break
+        elif part.startswith("<") and part[1:-1] in MARKS:
+            if part[1:-1] in stack:
+                continue  # <i> inside <i>: one italic
+            stack.append(part[1:-1])
+            out.append(part)
         else:
             out.append(part)
-    if inside:
-        out.append("</i>")
-    return "".join(out).replace("<i></i>", "")
+    out += [f"</{t}>" for t in reversed(stack)]
+    joined = "".join(out)
+    empty = re.compile(r"<(i|sup|sub)></\1>")
+    while empty.search(joined):
+        joined = empty.sub("", joined)
+    return joined
 
 
 def drop_first_letter(text: str, letter: str) -> str:
     """`text` without its first letter `letter` (a drop capital), marks kept."""
-    m = re.match(r"((?:\s|</?i>)*)", text)
+    m = re.match(r"((?:\s|</?(?:i|sup|sub)>)*)", text)
     head, rest = m.group(1), text[m.end():]
     return clean_marks(head.strip() + rest[len(letter):].lstrip()) if rest.startswith(letter) else text
 
 
 def marked_html(text: str, italic: bool) -> str:
-    """Escaped text with its marks as markup: <i> in upright text; in italic text the marked
-    words are the upright ones."""
-    tags = {"<i>": '<span class="up">', "</i>": "</span>"} if italic else {"<i>": "<i>", "</i>": "</i>"}
+    """Escaped text with its marks as markup: <i> in upright text, in italic text the marked
+    words are the upright ones; <sup>, <sub> as they are."""
+    tags = {"<sup>": "<sup>", "</sup>": "</sup>", "<sub>": "<sub>", "</sub>": "</sub>",
+            "<i>": '<span class="up">' if italic else "<i>", "</i>": "</span>" if italic else "</i>"}
     return "".join(tags.get(part, htmlmod.escape(part)) for part in MARK.split(clean_marks(text)))
 
 
