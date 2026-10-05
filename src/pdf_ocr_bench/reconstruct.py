@@ -231,7 +231,8 @@ def assign(lines: list[Line], layout: PageLayout) -> list[Line]:
             box = words[0][1]
             for _, b in words[1:]:
                 box = box.union(b)
-            out.append(Line(line.id if len(parts) == 1 else f"{line.id}{'abcdefgh'[k]}",
+            piece = "abcdefghijklmnopqrstuvwxyz"[k] if k < 26 else f"z{k}"  # a line across a table: many zones
+            out.append(Line(line.id if len(parts) == 1 else f"{line.id}{piece}",
                             " ".join(t for t, _ in words), box, words, zone_id))
     return out
 
@@ -794,6 +795,30 @@ def prepare_page(pdf_path: Path, n: int, out: Path, lang: tuple[str, ...]) -> di
             "dpi": dpi, "recovered": len(recovered), "seconds": time.perf_counter() - t}
 
 
+def scan_only_page(pdf_path: Path, n: int, out: Path) -> dict:
+    """A page the pipeline could not rebuild: the whole scan as one picture."""
+    import pypdfium2 as pdfium
+
+    name = f"page_{n + 1:03d}"
+    pw = out / "work" / name
+    pw.mkdir(parents=True, exist_ok=True)
+    pdf = pdfium.PdfDocument(str(pdf_path))
+    try:
+        page = pdf[n]
+        width_pt, height_pt = page.get_size()
+        dpi = native_dpi(page)
+        width, height = render(page, dpi, pw / "native.png")
+    finally:
+        pdf.close()
+    layout = PageLayout(width=width, height=height, line_height=30.0)
+    layout.zones = [Zone("picture", Box(0, 0, width, height), 0)]
+    for old in (out / "pictures").glob(f"{name}_*.png"):
+        old.unlink()
+    pictures = clip_pictures(pw / "native.png", layout, out, name)
+    return {"name": name, "layout": layout, "lines": [], "pictures": pictures, "size": (width_pt, height_pt),
+            "dpi": dpi, "recovered": 0, "seconds": 0.0}
+
+
 def reconstruct(pdf_path: Path, out: Path, pages: list[int], lang: tuple[str, ...], html_lang: str,
                 semantic_context: str = "", llm: bool = True, model: str = "sonnet", agents: int = 4,
                 fit_rounds: int = 10, zoom: bool = False, guide: str = "", thinking: bool = True,
@@ -814,7 +839,12 @@ def reconstruct(pdf_path: Path, out: Path, pages: list[int], lang: tuple[str, ..
         jobs = {pool.submit(prepare_page, pdf_path.resolve(), n, out, lang): n for n in pages}
         for done, job in enumerate(as_completed(jobs), 1):
             n = jobs[job]
-            r = results[n] = job.result()
+            try:
+                r = results[n] = job.result()
+            except Exception as exc:  # one page must not stop a volume: it is set as its scan
+                log.warning(f"[{done}/{len(pages)}] page_{n + 1:03d}: {type(exc).__name__}: {exc}; set as the scanned image")
+                results[n] = scan_only_page(pdf_path, n, out)
+                continue
             again = f" ({r['recovered']} read again from a strip)" if r["recovered"] else ""
             log.info(f"[{done}/{len(pages)}] {r['name']}: {r['dpi']:.0f} dpi, {len(r['layout'].zones)} zones, "
                      f"{len(r['lines'])} lines{again}, {len(r['pictures'])} pictures, {r['seconds']:.1f}s")
