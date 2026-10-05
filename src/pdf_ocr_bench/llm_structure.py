@@ -121,7 +121,8 @@ def to_items(answer: dict, lines: list, layout: PageLayout):
 
 
 # `claude -p` ran into the subscription's limit: asking further pages only uploads them for nothing
-LIMIT_HIT = re.compile(r"usage limit|rate limit|limit reached|hit your limit|limit will reset|resets? at", re.I)
+# ("You've hit your session limit · resets 6pm (Europe/Berlin)", HTTP 429)
+LIMIT_HIT = re.compile(r"\blimit\b|\bresets?\b", re.I)
 PUNCT = ".,;:!?()[]'\"*"
 WORD = re.compile(r"[A-Za-z][A-Za-z']*")
 MARKS = re.compile(r"</?i>")
@@ -217,7 +218,8 @@ class Structurer:
             content.append({"type": "text", "text": prompt + self._feedback(answer, r)})
             answer, result = claude_cli.ask(content, self.system, SCHEMA, pw, self.model, zoom=self.zoom,
                                             thinking=self.thinking)
-            if answer is None and LIMIT_HIT.search(str(result.get("result") or result.get("error") or "")):
+            if answer is None and (result.get("api_error_status") == 429
+                                   or LIMIT_HIT.search(str(result.get("result") or result.get("error") or ""))):
                 self.limited.set()
             items = to_items(answer, r["lines"], r["layout"]) if answer else None
             if items is not None:
