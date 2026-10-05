@@ -384,6 +384,7 @@ class Block:
     fit: tuple | None = None  # (lines in the scan, size to start from, line pitch) for sizing
     start_size: float = 0.0  # the size before the fit loop
     letter_spacing: float = 0.0  # em
+    pitch: float = 0.0  # the scan's line pitch, pt: the line height whenever the text is smaller
 
 
 def column_parts(item: Item, group: list[Line], lh: float) -> list[tuple[Item, list[Line]]]:
@@ -445,6 +446,14 @@ def _majority_zone(group: list[Line], default: str) -> str:
         if line.zone:
             counts[line.zone] = counts.get(line.zone, 0) + 1
     return max(counts, key=counts.get) if counts else default
+
+
+def _follow_size(b: Block) -> None:
+    """A wrapped block's line height after its size changed: the scan's pitch, or the size when
+    that is larger (the line height of a size taken from before would keep the lines as tall
+    as they were, and a block set smaller would still run into the next one)."""
+    if not b.nowrap and b.item is not None and b.item.kind != "dropcap":
+        b.line_h = max(b.pitch, b.size) if b.pitch else 1.15 * b.size
 
 
 def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictures: dict[str, str],
@@ -589,10 +598,10 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
                 beside_text, rest_text = _split_at(body, count)
                 part = dict(zone=item.zone, align=item.align, italic=item.italic)
                 blocks.append(Block(Item(text=beside_text, lines=[l.id for l in group if l not in below], **part),
-                                    bx0, top, bw, size, pitch))
+                                    bx0, top, bw, size, max(pitch, size), pitch=pitch))
                 if plain(rest_text).strip() and below:
                     rest = Block(Item(text=rest_text, lines=[l.id for l in below], **part),
-                                 x0, min(l.box.y0 for l in below) * px, w, size, pitch)
+                                 x0, min(l.box.y0 for l in below) * px, w, size, max(pitch, size), pitch=pitch)
                     rest.fit = (n - k, size, pitch)  # sized with the others, to the room below it
                     blocks.append(rest)
                 continue
@@ -601,7 +610,7 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
         align = item.align if item.kind == "paragraph" else "left"
         if item.kind == "heading":
             align = item.align if item.align != "justify" else "left"
-        block = Block(item, x0, top, w, size0, max(pitch, 1.0 * size0), align, indent=indent)
+        block = Block(item, x0, top, w, size0, max(pitch, 1.0 * size0), align, indent=indent, pitch=pitch)
         block.fit = (n, size0, pitch)  # sized below, once the room down to the next block is known
         blocks.append(block)
 
@@ -638,8 +647,8 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
         common = sorted(b.size for b in notes)[len(notes) // 2]
         for b in notes:
             b.size = min(b.size, common)
-            b.line_h = 1.15 * b.size
     for b in blocks:
+        _follow_size(b)
         b.start_size = b.size
     return blocks
 
@@ -857,6 +866,7 @@ def fit_round(target: Path, page_blocks: dict[int, list[Block]], pages_meta: lis
             block.size *= factor
             if block.nowrap:
                 block.line_h *= factor  # one line: its line box is the text's
+            _follow_size(block)
             shrunk[p["page_num"]] = shrunk.get(p["page_num"], 0) + 1
     return shrunk
 
@@ -866,13 +876,17 @@ _WORKER: dict = {}
 
 
 def prep_key(pdf_path: Path, lang: tuple[str, ...]) -> str:
-    """What steps 1-4 of a page depend on: the PDF, the languages, and this code."""
+    """What steps 1-4 of a page depend on: the PDF, the languages, and the code of those steps
+    (not the code that sets the page, which changes more often)."""
     import hashlib
+    import inspect
 
     here = Path(__file__).resolve().parent
     h = hashlib.sha1(f"{pdf_path.resolve()}|{pdf_path.stat().st_size}|{lang}".encode())
-    for source in ("reconstruct.py", "page_layout.py"):
-        h.update((here / source).read_bytes())
+    h.update((here / "page_layout.py").read_bytes())
+    for step in (prepare_page, native_dpi, render, vision_lines, recover_missed, measure_glyphs, assign,
+                 clip_pictures, Line):
+        h.update(inspect.getsource(step).encode())
     return h.hexdigest()
 
 
