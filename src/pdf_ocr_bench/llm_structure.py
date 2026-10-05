@@ -45,11 +45,14 @@ of the paragraph.
 - text: the item's text as printed, corrected against the images: the long s (ſ) written as s \
 ("fhould" -> "should", "Mofes" -> "Moses"), misread letters and italic capitals ("Fefus" -> "Jesus") \
 fixed, words split by a line-end hyphen joined. Keep the book's own spelling, capitals, punctuation \
-and abbreviations (thro', shew, perform'd); never modernise, translate, summarise, add or drop text.
+and abbreviations (thro', shew, perform'd); never modernise, translate, summarise, add or drop text. \
+Mark the words printed in the other style with <i>...</i>: in upright text the italic ones (names, \
+references such as "<i>Jer.</i> i. 6.", Latin words, emphasis), in an italic item the upright ones. \
+No other markup.
 - drop_cap: the letter, when the paragraph opens with a large (drop) initial; the text then starts \
 with that letter, though the OCR lines may not contain it.
 - align: justify for running text, center for centred lines, left or right otherwise.
-- italic: true when the item is (mostly) set in italic type."""
+- italic: true when the item is (mostly) set in italic type (its upright words then marked with <i>)."""
 
 SCHEMA = {
     "type": "object",
@@ -94,7 +97,7 @@ def page_prompt(layout: PageLayout, lines: list, semantic_context: str) -> str:
 
 def to_items(answer: dict, lines: list, layout: PageLayout):
     """The answer as `reconstruct.Item`s, checked against the OCR lines; None if it lost text."""
-    from .reconstruct import Item
+    from .reconstruct import Item, clean_marks, plain
 
     known = {l.id: l for l in lines}
     zones = {z.id for z in layout.zones}
@@ -102,10 +105,11 @@ def to_items(answer: dict, lines: list, layout: PageLayout):
     for a in answer.get("items", []):
         ids = [i for i in a.get("lines", []) if i in known and i not in used]
         used.update(ids)
-        if a.get("kind") == "noise" or not ids or not a.get("text", "").strip():
+        text = clean_marks(a.get("text", "").strip())
+        if a.get("kind") == "noise" or not ids or not plain(text).strip():
             continue
         zone = a.get("zone") if a.get("zone") in zones else known[ids[0]].zone
-        items.append(Item(zone=zone, text=a["text"].strip(), lines=ids, kind=a.get("kind", "paragraph"),
+        items.append(Item(zone=zone, text=text, lines=ids, kind=a.get("kind", "paragraph"),
                           drop_cap=(a.get("drop_cap") or "")[:1], align=a.get("align") or "justify",
                           italic=bool(a.get("italic"))))
     # lines the answer left out: fine when they are a little junk, not when text went missing
@@ -120,6 +124,7 @@ def to_items(answer: dict, lines: list, layout: PageLayout):
 LIMIT_HIT = re.compile(r"usage limit|rate limit|limit reached|hit your limit|limit will reset|resets? at", re.I)
 PUNCT = ".,;:!?()[]'\"*"
 WORD = re.compile(r"[A-Za-z][A-Za-z']*")
+MARKS = re.compile(r"</?i>")
 
 
 def _word_list() -> set[str]:
@@ -148,7 +153,7 @@ def learnings(source: Path, glossary: int = 150) -> str:
             if item.get("kind") == "noise":
                 continue
             ocr = " ".join(text_of.get(i, "") for i in item.get("lines", [])).split()
-            fixed = item.get("text", "").split()
+            fixed = MARKS.sub("", item.get("text", "")).split()
             for op, a0, a1, b0, b1 in difflib.SequenceMatcher(a=ocr, b=fixed, autojunk=False).get_opcodes():
                 if op != "replace" or a1 - a0 != b1 - b0:
                     continue  # a word joined across a line-end hyphen, a note left out: not a misreading

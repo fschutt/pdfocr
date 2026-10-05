@@ -265,7 +265,9 @@ pdf-ocr-bench reconstruct scan.pdf -o out --pages 1-20 --lang enm \
 5. **Structure**: an LLM (`claude -p`, `--model sonnet`, `--agents` pages at once) gets the zones
    with their OCR lines and the scan (reduced, and as 8 full-resolution tiles), plus
    `--semantic-context`. It answers which lines make a paragraph, a note or a heading line, the
-   corrected text (long s, misread letters), and drop capitals. `--no-llm` uses a heuristic
+   corrected text (long s, misread letters, the words in the other style marked `<i>…</i>`:
+   italic names and references in upright text, upright words in an italic item), and drop
+   capitals. `--no-llm` uses a heuristic
    from the line geometry instead (nothing is uploaded). `--zoom` lets the model crop the scan.
 6. **HTML**: every paragraph at the place of its first line, as wide as its column (beside the
    margin notes in it), justified and hyphenated, in Times at one size per column (the size at

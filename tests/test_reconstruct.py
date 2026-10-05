@@ -162,3 +162,17 @@ def test_drop_capital_is_the_scans_picture_over_its_letter_and_spaced_titles_are
     assert '<img class="pic" src="pictures/p_cap0.png"' in page
     assert "color: rgba(0, 0, 0, 0);" in page and ">T</p>" in page  # the letter, invisible: found and copied
     assert "letter-spacing:" in page
+
+
+def test_italic_marks_survive_splitting_drop_capitals_and_escaping():
+    from pdf_ocr_bench.reconstruct import _split_text, clean_marks, drop_first_letter, marked_html, plain
+
+    assert clean_marks("a <i>b <i>c</i> d</i> <i></i>e <i>f") == "a <i>b c</i> d e <i>f</i>"
+    assert plain("in <i>Jer.</i> i. 6.") == "in Jer. i. 6."
+    assert drop_first_letter("<i>Y</i>OU have", "Y") == "OU have"
+    assert drop_first_letter("THE obliging", "T") == "HE obliging"
+    lines = [Line("L1", "one two three", Box(0, 0, 1, 1)), Line("L2", "four five", Box(0, 2, 1, 3))]
+    first, rest = _split_text("one <i>two three four</i> five", 1, lines)
+    assert (first, rest) == ("one <i>two three</i>", "<i>four</i> five")
+    assert marked_html("A & <i>B</i>", italic=False) == "A &amp; <i>B</i>"
+    assert marked_html("<i>Rome</i> & <i>Paris", italic=True) == '<span class="up">Rome</span> &amp; <span class="up">Paris</span>'

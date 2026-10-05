@@ -419,7 +419,7 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
     for item in items:
         zone = zones.get(item.zone)
         group = [by_id[i] for i in item.lines if i in by_id]
-        if zone is None or not group or not item.text.strip():
+        if zone is None or not group or not plain(item.text).strip():
             continue
         first = group[0]
         top = first.box.y0 * px
@@ -437,17 +437,18 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
             # one line as printed: its own box, the size that spans it
             x0, w = first.box.x0 * px, first.box.w * px
             face = _times(item.italic)
-            size = min(1.1 * size0, w / max(face.text_length(item.text, 1.0), 0.1))
+            label = plain(item.text)
+            size = min(1.1 * size0, w / max(face.text_length(label, 1.0), 0.1))
             spacing = 0.0
-            if first.spacing > SPACED and first.glyph and len(item.text) > 2:
+            if first.spacing > SPACED and first.glyph and len(label) > 2:
                 # letter-spaced (D I C T I O N A R Y): the size of its glyphs, the rest of the
                 # printed width between the letters
-                letters = [c for c in item.text if c.isalpha()]
+                letters = [c for c in label if c.isalpha()]
                 caps = sum(c.isupper() for c in letters) >= 0.5 * max(len(letters), 1)
                 em = first.glyph * px / (TIMES_CAP if caps else TIMES_X)
-                natural = face.text_length(item.text, em)
+                natural = face.text_length(label, em)
                 if natural < w:
-                    size, spacing = em, (w - natural) / em / len(item.text)
+                    size, spacing = em, (w - natural) / em / len(label)
             blocks.append(Block(item, x0, top, max(w, 1.0) * 1.02, size, 1.2 * size, "left", nowrap=True,
                                 letter_spacing=spacing))
             continue
@@ -469,7 +470,8 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
                 left, right = zone.box.x0, zone.box.x1
             x0, w = left * px, (right - left) * px
         text = item.text
-        if item.drop_cap and text.startswith(item.drop_cap):
+        font = _times(item.italic)
+        if item.drop_cap and plain(text).lstrip().startswith(item.drop_cap):
             lh = layout.line_height
             # the capital left of the paragraph's first line, or in it (Vision may read it as the
             # line's first letter)
@@ -477,7 +479,10 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
                         if c.box.y0 - lh <= first.box.y0 <= c.box.y1
                         and c.box.x0 - 2 * lh <= first.box.x0 <= c.box.x1 + 3 * lh), None)
             if cap is not None:
-                k = max(1, len([l for l in group if l.box.y0 < cap.box.y1 - 0.3 * layout.line_height]))
+                # the printed lines beside the capital, and those below it
+                cut = cap.box.y1 - 0.3 * layout.line_height
+                k = max(1, len([y for y in rows if y < cut]))
+                below = [l for l in group if l.box.y0 >= cut]
                 cap_size = cap.box.h * px * 0.95
                 # the scan's own capital (plain or ornamented), over the letter as invisible text
                 blocks.append(Block(Item(item.zone, item.drop_cap, [], "dropcap"), cap.box.x0 * px, cap.box.y0 * px,
@@ -487,16 +492,24 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
                     # Vision's box of the first line takes in the capital: the line's own top is
                     # where the capital's top is (it stands on the first line's cap height)
                     top = cap.box.y0 * px - 0.28 * size0
-                # the lines beside the capital: narrower, starting right of it
-                beside_text, rest_text = _split_text(text[len(item.drop_cap):].lstrip(), k, group)
+                # the lines beside the capital, narrower, starting right of it, and the rest below at
+                # the same size: the paragraph's size over its printed lines, the words beside the
+                # capital as many as its lines hold at that size (Times is not the book's face, so
+                # not always the words printed there)
+                body = drop_first_letter(text, item.drop_cap)
                 bx0 = cap.box.x1 * px + 0.3 * size0
                 bw = x0 + w - bx0
-                blocks.append(Block(Item(item.zone, beside_text, item.lines[:k]), bx0, top, bw,
-                                    fit_size(beside_text, 0.97 * bw, k, size0, font), pitch))
-                rest = group[k:]
-                if rest_text and rest:
-                    blocks.append(Block(Item(item.zone, rest_text, item.lines[k:]), x0, rest[0].box.y0 * px, w,
-                                        fit_size(rest_text, 0.97 * w, len(rest), size0, font), pitch))
+                size = fit_size(plain(body), 0.97 * w, n, size0, font)
+                count = words_fitting(body.split(), 0.97 * bw, size, font, k) if below else len(body.split())
+                beside_text, rest_text = _split_at(body, count)
+                part = dict(zone=item.zone, align=item.align, italic=item.italic)
+                blocks.append(Block(Item(text=beside_text, lines=[l.id for l in group if l not in below], **part),
+                                    bx0, top, bw, size, pitch))
+                if plain(rest_text).strip() and below:
+                    rest = Block(Item(text=rest_text, lines=[l.id for l in below], **part),
+                                 x0, min(l.box.y0 for l in below) * px, w, size, pitch)
+                    rest.fit = (n - k, size, pitch)  # sized with the others, to the room below it
+                    blocks.append(rest)
                 continue
         indent = max(0.0, first.box.x0 * px - x0) if item.kind == "paragraph" else 0.0
         indent = indent if indent > 0.5 * size0 else 0.0
@@ -524,7 +537,7 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
             continue
         n, size0, pitch = b.fit
         room_lines = int((b.limit - b.y) / max(pitch, 1.0) + 0.15)
-        b.size = fit_size(b.item.text, 0.97 * b.w, max(n, room_lines), size0, _times(b.item.italic), b.indent)
+        b.size = fit_size(plain(b.item.text), 0.97 * b.w, max(n, room_lines), size0, _times(b.item.italic), b.indent)
         b.line_h = max(pitch, b.size)
 
     # one size per zone: the median of its paragraphs' fitted sizes, a paragraph that needs a
@@ -566,6 +579,7 @@ def blocks_html(blocks: list[Block], width_pt: float, height_pt: float, lang: st
   .page {{ position: relative; width: {width_pt:.2f}pt; height: {height_pt:.2f}pt; overflow: hidden; }}
   .region {{ position: absolute; color: #000; font-family: {FONT_FAMILY}; hyphens: auto; -azul-hyphenation-language: {htmlmod.escape(lang)}; }}
   .region p {{ margin: 0; }}
+  .region .up {{ font-style: normal; }}
   .pic {{ position: absolute; }}
 </style>
 </head>
@@ -580,9 +594,75 @@ def blocks_html(blocks: list[Block], width_pt: float, height_pt: float, lang: st
 
 def _split_text(text: str, k: int, group: list[Line]) -> tuple[str, str]:
     """The words of the first `k` OCR lines, and the rest (by the OCR lines' word counts)."""
-    n = sum(len(l.text.split()) for l in group[:k])
+    return _split_at(text, sum(len(l.text.split()) for l in group[:k]))
+
+
+def _split_at(text: str, n: int) -> tuple[str, str]:
+    """The first `n` words of `text` and the rest; an <i> that runs across the split is closed in
+    the first part and opened again in the second."""
     words = text.split()
-    return " ".join(words[:n]), " ".join(words[n:])
+    first, rest = " ".join(words[:n]), " ".join(words[n:])
+    if first.count("<i>") > first.count("</i>"):
+        first, rest = first + "</i>", "<i>" + rest
+    return clean_marks(first), clean_marks(rest)
+
+
+def words_fitting(words: list[str], width_pt: float, size: float, font, n_lines: int) -> int:
+    """How many of `words` fill `n_lines` lines of `width_pt` at `size` (as `wrap_lines` sets them)."""
+    space = font.text_length(" ", size)
+    lines, x = 1, 0.0
+    for i, word in enumerate(words):
+        w = font.text_length(plain(word), size)
+        if x > 0 and x + space + w > width_pt:
+            lines, x = lines + 1, w
+            if lines > n_lines:
+                return i
+        else:
+            x = x + (space if x > 0 else 0) + w
+    return len(words)
+
+
+# --- the other style inside a text: <i>...</i> ------------------------------------------------
+
+MARK = re.compile(r"(</?i>)")
+
+
+def plain(text: str) -> str:
+    """`text` without its <i> marks."""
+    return MARK.sub("", text)
+
+
+def clean_marks(text: str) -> str:
+    """Only <i>...</i> pairs, balanced, not nested, not empty; anything else is text."""
+    out, inside = [], False
+    for part in MARK.split(text):
+        if part == "<i>":
+            if not inside:
+                out.append(part)
+            inside = True
+        elif part == "</i>":
+            if inside:
+                out.append(part)
+            inside = False
+        else:
+            out.append(part)
+    if inside:
+        out.append("</i>")
+    return "".join(out).replace("<i></i>", "")
+
+
+def drop_first_letter(text: str, letter: str) -> str:
+    """`text` without its first letter `letter` (a drop capital), marks kept."""
+    m = re.match(r"((?:\s|</?i>)*)", text)
+    head, rest = m.group(1), text[m.end():]
+    return clean_marks(head.strip() + rest[len(letter):].lstrip()) if rest.startswith(letter) else text
+
+
+def marked_html(text: str, italic: bool) -> str:
+    """Escaped text with its marks as markup: <i> in upright text; in italic text the marked
+    words are the upright ones."""
+    tags = {"<i>": '<span class="up">', "</i>": "</span>"} if italic else {"<i>": "<i>", "</i>": "</i>"}
+    return "".join(tags.get(part, htmlmod.escape(part)) for part in MARK.split(clean_marks(text)))
 
 
 def _pos(x: float, y: float, w: float, height_pt: float, width_pt: float) -> str:
@@ -603,7 +683,7 @@ def _block(item: Item, x: float, y: float, w: float, size: float, line_h: float,
         style += " color: rgba(0, 0, 0, 0);"
     p_style = f' style="text-indent: {indent:.1f}pt;"' if indent else ""
     attrs = f'data-zone="{item.zone}" data-role="{item.kind}"' + (f' data-lines="{" ".join(item.lines)}"' if item.lines else "")
-    return f'<div class="region" {attrs} style="{style}"><p{p_style}>{htmlmod.escape(item.text)}</p></div>'
+    return f'<div class="region" {attrs} style="{style}"><p{p_style}>{marked_html(item.text, item.italic)}</p></div>'
 
 
 # --- the pipeline ----------------------------------------------------------------------------
