@@ -96,8 +96,9 @@ pub fn rewrite_texts(html: &str, mut f: impl FnMut(&str) -> String) -> String {
 }
 
 /// The page with every word of its text blocks (`<div class="region">`, as `pdf-ocr-bench
-/// reconstruct` writes them) replaced by `f(word)`; markup and spacing are kept.
-pub fn rewrite_region_texts(html: &str, mut f: impl FnMut(&str) -> String) -> String {
+/// reconstruct` writes them) replaced by `f(word, italic)`; markup and spacing are kept. A word
+/// is italic in an italic block (`font-style: italic`) or in `<i>`, upright in `<span class="up">`.
+pub fn rewrite_region_texts(html: &str, mut f: impl FnMut(&str, bool) -> String) -> String {
     const OPEN: &str = "<div class=\"region\"";
     let mut out = String::with_capacity(html.len());
     let mut pos = 0;
@@ -107,8 +108,18 @@ pub fn rewrite_region_texts(html: &str, mut f: impl FnMut(&str) -> String) -> St
         out.push_str(&html[pos..start]);
         // the text between the block's tags, word by word
         let mut rest = &html[start..end];
+        let block_italic = rest[..rest.find('>').unwrap_or(rest.len())].contains("font-style: italic");
+        let mut italic = block_italic;
         while let Some(gt) = rest.find('>') {
-            out.push_str(&rest[..=gt]);
+            let tag = &rest[..=gt];
+            if tag.starts_with("<i>") || tag.starts_with("<i ") {
+                italic = true;
+            } else if tag.starts_with("<span class=\"up\"") {
+                italic = false;
+            } else if tag.starts_with("</i") || tag.starts_with("</span") {
+                italic = block_italic;
+            }
+            out.push_str(tag);
             rest = &rest[gt + 1..];
             let text_end = rest.find('<').unwrap_or(rest.len());
             let text = unescape(&rest[..text_end]);
@@ -116,7 +127,7 @@ pub fn rewrite_region_texts(html: &str, mut f: impl FnMut(&str) -> String) -> St
             for c in text.chars().chain(std::iter::once(' ')) {
                 if c.is_whitespace() {
                     if !word.is_empty() {
-                        out.push_str(&escape(&f(&word)));
+                        out.push_str(&escape(&f(&word, italic)));
                         word.clear();
                     }
                     out.push(c);
@@ -261,9 +272,20 @@ mod tests {
     }
 
     #[test]
+    fn knows_which_words_are_italic() {
+        let page = r#"<div class="region" style="left: 1%;"><p>a <i>b c</i> d</p></div><div class="region" style="font-style: italic;"><p>e <span class="up">f</span> g</p></div>"#;
+        let mut seen = Vec::new();
+        rewrite_region_texts(page, |w, italic| {
+            seen.push(format!("{w}{}", if italic { "/i" } else { "" }));
+            w.to_string()
+        });
+        assert_eq!(seen, ["a", "b/i", "c/i", "d", "e/i", "f", "g/i"]);
+    }
+
+    #[test]
     fn rewrites_the_words_of_text_blocks() {
         let page = r#"<div class="page"><div class="region" style="left: 1%;"><p style="text-indent: 9pt;">to addrefs  Thefe &amp; ſo</p></div><img class="pic" src="a.png"></div>"#;
-        let out = rewrite_region_texts(page, |w| w.replace('f', "s").replace('ſ', "s"));
+        let out = rewrite_region_texts(page, |w, _| w.replace('f', "s").replace('ſ', "s"));
         assert_eq!(
             out,
             r#"<div class="page"><div class="region" style="left: 1%;"><p style="text-indent: 9pt;">to address  These &amp; so</p></div><img class="pic" src="a.png"></div>"#

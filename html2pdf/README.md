@@ -54,6 +54,11 @@ in about 6% of all words of an 18th-century English text.
 It works on the OCR word spans and on the text blocks (`<div class="region">`) that
 `pdf-ocr-bench reconstruct` writes.
 
+* `--long-s careful` is for text a reader already corrected (`reconstruct` uses it): no fixed
+  pairs ("fame" may be fame), and an f before a vowel only in a lower-case word of five letters or
+  more that is not set in italic. On vol. 1 of the Calmet that keeps "fide", "fuit", "fol.",
+  "Rufin." and "fewer", and still repairs "againft", "fhall", "laft", "Hiftory".
+
 The run prints how many words were changed, with examples.
 
 ## Flow layout

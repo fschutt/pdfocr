@@ -36,7 +36,7 @@ import shutil
 import subprocess
 import time
 import zipfile
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 from .log import get_logger
@@ -386,6 +386,67 @@ class Block:
     letter_spacing: float = 0.0  # em
 
 
+def column_parts(item: Item, group: list[Line], lh: float) -> list[tuple[Item, list[Line]]]:
+    """A paragraph that runs on into the next column: one part per column (a new part where its
+    lines go back up the page), each with its share of the text (by the OCR's characters), in the
+    zone most of its lines stand in."""
+    runs: list[list[Line]] = [[group[0]]]
+    for line in group[1:]:
+        prev = runs[-1][-1]
+        # back up the page, and across to another column (lines merely listed out of order stay)
+        if line.box.y0 < prev.box.y0 - 2 * lh and (line.zone != prev.zone or abs(line.box.x0 - prev.box.x0) > 4 * lh):
+            runs.append([line])
+        else:
+            runs[-1].append(line)
+    if len(runs) == 1:
+        return [(replace(item, zone=_majority_zone(group, item.zone)), group)]
+    chars = [sum(len(l.text) for l in run) for run in runs]
+    words, out, taken = item.text.split(), [], 0
+    rest = item.text
+    for k, run in enumerate(runs):
+        last = k == len(runs) - 1
+        n = len(words) - taken if last else round(len(words) * sum(chars[:k + 1]) / max(sum(chars), 1)) - taken
+        piece, rest = (rest, "") if last else _split_at(rest, max(0, n))
+        taken += max(0, n)
+        if plain(piece).strip():
+            out.append((replace(item, text=piece, lines=[l.id for l in run], zone=_majority_zone(run, item.zone),
+                                drop_cap=item.drop_cap if k == 0 else ""), run))
+    return out or [(item, group)]
+
+
+def own_extent(text: str, group: list[Line]) -> Box | None:
+    """Where the words of `text` stand on its OCR lines, when those lines also carry other text
+    (Vision reads a margin note and the line of text beside it as one line); None if too few of
+    its words are found there."""
+    norm = lambda w: re.sub(r"[^a-z0-9]", "", w.lower().replace("ſ", "s").replace("f", "s"))
+    want: dict[str, int] = {}
+    words = [norm(w) for w in plain(text).split()]
+    for w in words:
+        if w:
+            want[w] = want.get(w, 0) + 1
+    found = []
+    for line in group:
+        for t, box in line.words:
+            k = norm(t)
+            if want.get(k, 0) > 0:
+                want[k] -= 1
+                found.append(box)
+    if not found or len(found) < 0.5 * len([w for w in words if w]):
+        return None
+    out = found[0]
+    for b in found[1:]:
+        out = out.union(b)
+    return out
+
+
+def _majority_zone(group: list[Line], default: str) -> str:
+    counts: dict[str, int] = {}
+    for line in group:
+        if line.zone:
+            counts[line.zone] = counts.get(line.zone, 0) + 1
+    return max(counts, key=counts.get) if counts else default
+
+
 def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictures: dict[str, str],
                  width_pt: float, height_pt: float) -> list[Block]:
     font = _times()
@@ -409,20 +470,27 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
     # left of) them, so a paragraph does not run under its note
     inner_notes = []
     for it in items:
-        z, g = zones.get(it.zone), [by_id[i] for i in it.lines if i in by_id]
+        g = [by_id[i] for i in it.lines if i in by_id]
+        z = zones.get(_majority_zone(g, it.zone)) if g else None
         if it.kind != "note" or z is None or z.role == "notes" or not g:
             continue
-        nx0, nx1 = min(l.box.x0 for l in g), max(l.box.x1 for l in g)
+        own = own_extent(it.text, g)
+        nx0, nx1 = (own.x0, own.x1) if own else (min(l.box.x0 for l in g), max(l.box.x1 for l in g))
+        ny0, ny1 = (own.y0, own.y1) if own else (min(l.box.y0 for l in g), max(l.box.y1 for l in g))
         # narrow, at an edge of its column (a footnote under the text is neither)
         if nx1 - nx0 < 0.3 * z.box.w and (nx0 < z.box.x0 + 0.1 * z.box.w or nx1 > z.box.x1 - 0.1 * z.box.w):
-            inner_notes.append((nx0, min(l.box.y0 for l in g), nx1, max(l.box.y1 for l in g)))
+            inner_notes.append((nx0, ny0, nx1, ny1))
 
-    for item in items:
+    for whole in items:
+      group_all = [by_id[i] for i in whole.lines if i in by_id]
+      if not group_all or not plain(whole.text).strip():
+          continue
+      parts = column_parts(whole, group_all, layout.line_height) if whole.kind in ("paragraph", "note") else [(whole, group_all)]
+      for part_no, (item, group) in enumerate(parts):
         zone = zones.get(item.zone)
-        group = [by_id[i] for i in item.lines if i in by_id]
-        if zone is None or not group or not plain(item.text).strip():
+        if zone is None:
             continue
-        first = group[0]
+        first = min(group, key=lambda l: (l.box.y0, l.box.x0)) if part_no else group[0]
         top = first.box.y0 * px
         size0 = em_of(group)
         # the printed lines (Vision may read one in two pieces) and their pitch: the usual step
@@ -454,11 +522,27 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
                                 letter_spacing=spacing))
             continue
         if item.kind == "note" and zone.role != "notes":
-            # a note the layout did not set apart (in a column's margin): as wide as its own lines
-            gx0, gx1 = min(l.box.x0 for l in group), max(l.box.x1 for l in group)
+            # a note the layout did not set apart (in a column's margin): as wide as its own words
+            own = own_extent(item.text, group)
+            gx0, gx1 = (own.x0, own.x1) if own else (min(l.box.x0 for l in group), max(l.box.x1 for l in group))
+            if own:
+                top = own.y0 * px
+            else:
+                # its words are not on its lines (the model read the note from the scan and gave
+                # it a line of the text beside it): the margin the column's other notes stand in
+                same = [nt for nt in inner_notes if zone.box.x0 - layout.line_height <= (nt[0] + nt[2]) / 2 <= zone.box.x1]
+                if same:
+                    gx0, _, gx1, _ = min(same, key=lambda nt: abs(nt[1] - first.box.y0))
             x0, w = gx0 * px, (gx1 - gx0) * px * 1.05
         else:
             left, right = zone.box.x0, zone.box.x1
+            # the measure of its own lines: where most start, where the long ones end
+            x0s, x1s = sorted(l.box.x0 for l in group), sorted(l.box.x1 for l in group)
+            ex0, ex1 = x0s[round(0.2 * (len(x0s) - 1))], x1s[round(0.9 * (len(x1s) - 1))]
+            if not (0.8 * (ex1 - ex0) <= right - left <= 1.6 * (ex1 - ex0)):
+                # a zone that is no column of it: a speck labelled footnotes, footnotes set in
+                # three columns inside a wide zone, a zone narrower than the text
+                left, right = ex0, ex0 + 1.02 * (ex1 - ex0)
             gy0, gy1 = min(l.box.y0 for l in group), max(l.box.y1 for l in group)
             for nx0, ny0, nx1, ny1 in inner_notes:
                 if min(ny1, gy1) - max(ny0, gy0) < 0.5 * layout.line_height or nx1 < left or nx0 > right:
@@ -467,12 +551,12 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
                     left = nx1 + 0.5 * layout.line_height
                 elif (nx0 + nx1) / 2 > right - 0.3 * (right - left):
                     right = nx0 - 0.5 * layout.line_height
-            if right - left < 0.5 * zone.box.w:  # not a margin: the notes took most of the zone
-                left, right = zone.box.x0, zone.box.x1
+            if right - left < 0.5 * zone.box.w and right - left < 0.5 * (ex1 - ex0):
+                left, right = ex0, ex0 + 1.02 * (ex1 - ex0)  # not a margin: the notes took most of it
             x0, w = left * px, (right - left) * px
         text = item.text
         font = _times(item.italic)
-        if item.drop_cap and plain(text).lstrip().startswith(item.drop_cap):
+        if part_no == 0 and item.drop_cap and plain(text).lstrip().startswith(item.drop_cap):
             lh = layout.line_height
             # the capital left of the paragraph's first line, or in it (Vision may read it as the
             # line's first letter)
@@ -512,7 +596,7 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
                     rest.fit = (n - k, size, pitch)  # sized with the others, to the room below it
                     blocks.append(rest)
                 continue
-        indent = max(0.0, first.box.x0 * px - x0) if item.kind == "paragraph" else 0.0
+        indent = max(0.0, first.box.x0 * px - x0) if item.kind == "paragraph" and part_no == 0 else 0.0
         indent = indent if indent > 0.5 * size0 else 0.0
         align = item.align if item.kind == "paragraph" else "left"
         if item.kind == "heading":
@@ -631,6 +715,29 @@ MARK = re.compile(r"(</?i>)")
 def plain(text: str) -> str:
     """`text` without its <i> marks."""
     return MARK.sub("", text)
+
+
+SUPERSCRIPT = dict(zip("abcdefghijklmnoprstuvwxyz0123456789ABDEGHIJKLMNOPRTUVW+-=()*†‡§",
+                       "ᵃᵇᶜᵈᵉᶠᵍʰⁱʲᵏˡᵐⁿᵒᵖʳˢᵗᵘᵛʷˣʸᶻ⁰¹²³⁴⁵⁶⁷⁸⁹ᴬᴮᴰᴱᴳᴴᴵᴶᴷᴸᴹᴺᴼᴾᴿᵀᵁⱽᵂ⁺⁻⁼⁽⁾*†‡§"))
+TAG = re.compile(r"<(/?)([a-zA-Z]+)[^<>]*>")
+
+
+def _superscript(m: re.Match) -> str:
+    inner = m.group(1)
+    return "".join(SUPERSCRIPT[c] for c in inner) if inner and all(c in SUPERSCRIPT for c in inner) else inner
+
+
+def normalize_markup(text: str) -> str:
+    """A model's answer as plain text with <i> marks: a raised note letter (<sup>a</sup>) as the
+    superscript letter (azul does not raise <sup> or vertical-align: super), <em> as <i>, other
+    tags dropped with their text kept."""
+    text = re.sub(r"<sup>([^<>]{0,6})</sup>", _superscript, text)
+    def tag(m: re.Match) -> str:
+        name = m.group(2).lower()
+        if name in ("i", "em"):
+            return f"<{m.group(1)}i>"
+        return " " if name == "br" else ""
+    return TAG.sub(tag, text)
 
 
 def clean_marks(text: str) -> str:
@@ -934,7 +1041,7 @@ def reconstruct(pdf_path: Path, out: Path, pages: list[int], lang: tuple[str, ..
         cmd = [str(HTML2PDF), str(target), "-o", str(pdf_out), "--layout-report", str(report)]
         if html_lang.split("-")[0] == "en" and Path(WORD_LIST).exists():
             # f the model still read for a long s ("addrefs"), from the word list
-            cmd += ["--long-s", "repair", "--dict", WORD_LIST]
+            cmd += ["--long-s", "careful", "--dict", WORD_LIST]
         done = subprocess.run(cmd, capture_output=True, text=True)
         for line in done.stdout.splitlines() + done.stderr.splitlines():
             if "Layout report" in line or "Long s" in line or "Wrote" in line or "error" in line.lower():

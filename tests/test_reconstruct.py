@@ -176,3 +176,27 @@ def test_italic_marks_survive_splitting_drop_capitals_and_escaping():
     assert (first, rest) == ("one <i>two three</i>", "<i>four</i> five")
     assert marked_html("A & <i>B</i>", italic=False) == "A &amp; <i>B</i>"
     assert marked_html("<i>Rome</i> & <i>Paris", italic=True) == '<span class="up">Rome</span> &amp; <span class="up">Paris</span>'
+
+
+def test_a_paragraph_running_on_into_the_next_column_is_a_block_per_column():
+    layout = PageLayout(width=1000, height=1000, line_height=30)
+    layout.zones = [Zone("column", Box(100, 100, 480, 900), 0), Zone("column", Box(520, 100, 900, 900), 1),
+                    Zone("footnotes", Box(300, 950, 305, 955), 0)]
+    left = [Line(f"A{i}", "words of the first column here", Box(100, 700 + 40 * i, 480, 730 + 40 * i), [], "column0") for i in range(5)]
+    right = [Line(f"B{i}", "and the end of it here", Box(520, 100 + 40 * i, 900, 130 + 40 * i), [], "column1") for i in range(2)]
+    notes = [Line("F1", "a Plin. l. 6.", Box(100, 940, 250, 965), [], "footnotes0")]
+    text = " ".join(["words of the first column here"] * 5 + ["and the end of it here"] * 2)
+    items = [Item("column0", text, [l.id for l in left + right]), Item("footnotes0", "a Plin. l. 6.", ["F1"], "note")]
+    blocks = [b for b in build_blocks(items, left + right + notes, layout, {}, 1000, 1000) if b.item]
+    parts = [b for b in blocks if b.item.kind == "paragraph"]
+    assert [round(b.x) for b in parts] == [100, 520] and [b.item.zone for b in parts] == ["column0", "column1"]
+    assert parts[1].y == pytest.approx(100) and " ".join(b.item.text for b in parts) == text
+    foot = next(b for b in blocks if b.item.kind == "note")
+    assert foot.w > 100  # as wide as its line, not the 5 px speck of a zone it was labelled with
+
+
+def test_other_markup_in_an_answer_is_normalised():
+    from pdf_ocr_bench.reconstruct import normalize_markup
+
+    assert normalize_markup("Chester<sup>a</sup>, <em>Job</em> <small>xi.</small> <sup>q</sup>") == "Chesterᵃ, <i>Job</i> xi. q"
+    assert normalize_markup('<span class="x">Basil</span><br>Rome') == "Basil Rome"

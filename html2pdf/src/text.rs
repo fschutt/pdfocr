@@ -18,11 +18,18 @@ pub enum LongS {
     S,
     /// Replace ſ with s, and f read for a long s with s where the word list says so
     Repair,
+    /// As repair, for text a reader already corrected (`pdf-ocr-bench reconstruct`): only an f
+    /// that is no word's (no fixed pairs: "fame" may be fame), and an f before a vowel only in
+    /// a lower-case word of five letters or more (Latin "fide", "fuit", "fol.", names "Rufin.")
+    Careful,
 }
 
 /// Word pairs where both spellings are words but the f-form is rare in 18th-century prose, so an
 /// engine that reads a long s as f almost always means the s-form. Pairs that are both common
 /// (faith/saith, fold/sold, fight/sight) are left alone.
+/// Words with an f that a word list of base forms lacks (comparatives): never "repaired".
+const KNOWN_F: &[&str] = &["fewer", "fewest", "finer", "finest", "fuller", "fullest", "fairer", "fairest", "fatter", "firmer"];
+
 const PREFER_S: &[(&str, &str)] = &[
     ("fo", "so"),
     ("fame", "same"),
@@ -134,6 +141,12 @@ pub fn replace_long_s(text: &str) -> String {
 /// `word` (with its punctuation) with `f` read for a long s turned into `s`, or None if it
 /// needs no change: "fhould," -> "should,", "Addreffes" -> "Addresses", "Mofes's" -> "Moses's".
 pub fn repair_f(word: &str, dict: &Dictionary) -> Option<String> {
+    repair_f_with(word, dict, false, false)
+}
+
+/// `repair_f`, or with `careful` its cautious form (see `LongS::Careful`); an `italic` word (Latin
+/// in this kind of book: "feras", "fecit") only where an f stands before a consonant.
+pub fn repair_f_with(word: &str, dict: &Dictionary, careful: bool, italic: bool) -> Option<String> {
     let start = word.find(|c: char| c.is_alphabetic())?;
     let end = word.char_indices().rev().find(|&(_, c)| c.is_alphabetic() || c == '\'').map(|(i, c)| i + c.len_utf8())?;
     let core = &word[start..end];
@@ -141,16 +154,21 @@ pub fn repair_f(word: &str, dict: &Dictionary) -> Option<String> {
         return None;
     }
     let lower = core.to_lowercase();
-    if let Some((_, s_form)) = PREFER_S.iter().find(|(f_form, _)| *f_form == lower) {
+    if let Some((_, s_form)) = PREFER_S.iter().find(|(f_form, _)| *f_form == lower).filter(|_| !careful) {
         return Some(format!("{}{}{}", &word[..start], match_case(core, s_form), &word[end..]));
     }
-    if dict.knows(core) {
+    if dict.knows(core) || KNOWN_F.contains(&lower.as_str()) {
         return None;
     }
     let chars: Vec<char> = core.chars().collect();
     // a long s never ends a word, so neither does an f read for one
     let last_letter = chars.iter().rposition(|c| c.is_alphabetic())?;
-    let positions: Vec<usize> = (0..last_letter).filter(|&i| chars[i] == 'f').collect();
+    let long_lower = !italic && chars.iter().filter(|c| c.is_alphabetic()).count() >= 5 && chars[0].is_lowercase();
+    let positions: Vec<usize> = (0..last_letter)
+        .filter(|&i| chars[i] == 'f')
+        // ſt, ſh, ſp.. are long-s spellings in any language; ſa, ſe, ſi.. also begin Latin words
+        .filter(|&i| !careful || long_lower || !"aeiouy".contains(chars[i + 1].to_ascii_lowercase()))
+        .collect();
     for n in 1..=positions.len().min(3) {
         for combo in combinations(&positions, n) {
             let variant: String = chars.iter().enumerate().map(|(i, &c)| if combo.contains(&i) { 's' } else { c }).collect();
@@ -200,6 +218,11 @@ impl<'a> Fixer<'a> {
     }
 
     pub fn word(&mut self, word: &str) -> String {
+        self.word_styled(word, false)
+    }
+
+    /// `word`, knowing whether it is set in italic (see `repair_f_with`).
+    pub fn word_styled(&mut self, word: &str, italic: bool) -> String {
         if self.mode == LongS::Keep {
             return word.to_string();
         }
@@ -207,8 +230,8 @@ impl<'a> Fixer<'a> {
         if out != word {
             self.long_s += 1;
         }
-        if let (LongS::Repair, Some(dict)) = (self.mode, self.dict) {
-            if let Some(fixed) = repair_f(&out, dict) {
+        if let (LongS::Repair | LongS::Careful, Some(dict)) = (self.mode, self.dict) {
+            if let Some(fixed) = repair_f_with(&out, dict, self.mode == LongS::Careful, italic) {
                 self.repaired += 1;
                 if self.examples.len() < 12 {
                     self.examples.insert(out.clone(), fixed.clone());
@@ -290,6 +313,27 @@ mod tests {
         assert_eq!(repair_f("Favourable", &d), None);
         assert_eq!(repair_f("favoured,", &d), None);
         assert_eq!(repair_f("fource", &d).as_deref(), Some("source"));
+    }
+
+    #[test]
+    fn careful_repair_leaves_latin_names_and_fixed_pairs() {
+        let d = Dictionary::from_words(["side", "suit", "sol", "same", "last", "shall", "against", "sewer", "fewer", "Rusin", "history", "supposition"]);
+        let fix = |w: &str| repair_f_with(w, &d, true, false);
+        assert_eq!(fix("fide"), None); // Latin "bona fide"; repair_f takes it for "side"
+        assert_eq!(fix("fuit"), None);
+        assert_eq!(fix("fol."), None);
+        assert_eq!(fix("fame"), None); // fame may be fame: the reader decided
+        assert_eq!(fix("Rufin."), None);
+        assert_eq!(fix("laft").as_deref(), Some("last")); // f before a consonant
+        assert_eq!(fix("fhall").as_deref(), Some("shall"));
+        assert_eq!(fix("againft").as_deref(), Some("against"));
+        assert_eq!(fix("Hiftory").as_deref(), Some("History"));
+        assert_eq!(fix("suppofition").as_deref(), Some("supposition")); // long, lower case
+        assert_eq!(repair_f("fide", &d).as_deref(), Some("side"));
+        assert_eq!(fix("fewer"), None);
+        let d = Dictionary::from_words(["seras", "history"]);
+        assert_eq!(repair_f_with("feras", &d, true, true), None); // italic: Latin "feras"
+        assert_eq!(repair_f_with("Hiftory", &d, true, true).as_deref(), Some("History"));
     }
 
     #[test]

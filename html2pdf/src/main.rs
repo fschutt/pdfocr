@@ -242,7 +242,7 @@ fn read_entry(zip: &mut ZipArchive<File>, name: &str) -> Result<Vec<u8>> {
 /// The word list, if `--long-s repair` or `--layout flow` (hyphen joining) uses one. Without it,
 /// repair is an error and flow joins every line-end hyphen.
 fn load_dictionary(args: &Args) -> Result<Option<Dictionary>> {
-    let needed = args.long_s == LongS::Repair || args.layout == Layout::Flow;
+    let needed = matches!(args.long_s, LongS::Repair | LongS::Careful) || args.layout == Layout::Flow;
     if !needed {
         return Ok(None);
     }
@@ -251,7 +251,7 @@ fn load_dictionary(args: &Args) -> Result<Option<Dictionary>> {
             println!("[html2pdf] Word list {}: {} words", args.dict.display(), dict.len());
             Ok(Some(dict))
         }
-        Err(err) if args.long_s == LongS::Repair => Err(err.context("--long-s repair needs a word list (--dict PATH)")),
+        Err(err) if matches!(args.long_s, LongS::Repair | LongS::Careful) => Err(err.context("--long-s repair needs a word list (--dict PATH)")),
         Err(err) => {
             eprintln!("[html2pdf] {err:#}; line-end hyphens are joined without checking words");
             Ok(None)
@@ -272,7 +272,9 @@ fn transform(
     match args.layout {
         Layout::Positioned if args.long_s == LongS::Keep => html.to_string(),
         Layout::Positioned => {
-            words::rewrite_region_texts(&words::rewrite_texts(html, |word| fixer.word(word)), |word| fixer.word(word))
+            words::rewrite_region_texts(&words::rewrite_texts(html, |word| fixer.word(word)), |word, italic| {
+                fixer.word_styled(word, italic)
+            })
         }
         Layout::Flow => {
             let lang = words::html_lang(html).unwrap_or("en").to_string();

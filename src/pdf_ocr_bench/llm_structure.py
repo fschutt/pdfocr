@@ -97,7 +97,7 @@ def page_prompt(layout: PageLayout, lines: list, semantic_context: str) -> str:
 
 def to_items(answer: dict, lines: list, layout: PageLayout):
     """The answer as `reconstruct.Item`s, checked against the OCR lines; None if it lost text."""
-    from .reconstruct import Item, clean_marks, plain
+    from .reconstruct import Item, clean_marks, normalize_markup, plain
 
     known = {l.id: l for l in lines}
     zones = {z.id for z in layout.zones}
@@ -105,7 +105,7 @@ def to_items(answer: dict, lines: list, layout: PageLayout):
     for a in answer.get("items", []):
         ids = [i for i in a.get("lines", []) if i in known and i not in used]
         used.update(ids)
-        text = clean_marks(a.get("text", "").strip())
+        text = clean_marks(normalize_markup(a.get("text", "").strip()))
         if a.get("kind") == "noise" or not ids or not plain(text).strip():
             continue
         zone = a.get("zone") if a.get("zone") in zones else known[ids[0]].zone
