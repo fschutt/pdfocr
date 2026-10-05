@@ -294,6 +294,13 @@ fn render_page(
     warnings: &mut Vec<PdfWarnMsg>,
 ) -> Result<PdfDocument> {
     let (width, height) = page.size_mm();
+    // only the images this page shows: printpdf decodes every image it is handed, for every page
+    // (a volume's pictures, once per page, made a 1053-page render take 22 minutes)
+    let images: BTreeMap<String, Base64OrRaw> = images
+        .iter()
+        .filter(|(name, _)| html.contains(&format!("src=\"{name}\"")))
+        .map(|(name, image)| (name.clone(), image.clone()))
+        .collect();
     let options = GeneratePdfOptions {
         page_width: Some(width),
         page_height: Some(height),
@@ -303,7 +310,7 @@ fn render_page(
         margin_left: Some(0.0),
         ..Default::default()
     };
-    let doc = PdfDocument::from_html_with_cache(html, images, fonts, &options, warnings, Some(pool.clone()))
+    let doc = PdfDocument::from_html_with_cache(html, &images, fonts, &options, warnings, Some(pool.clone()))
         .map_err(anyhow::Error::msg)?;
     if doc.pages.is_empty() {
         bail!("printpdf produced no page");
