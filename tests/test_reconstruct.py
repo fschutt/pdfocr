@@ -141,3 +141,24 @@ def test_learnings_keep_misreadings_that_are_no_words(tmp_path):
     assert "muft -> must" in guide and "Hiftory -> History" in guide
     assert "whole -> whose" not in guide and "fee -> see" not in guide  # words: right only on their page
     assert "<example_answer>" in guide
+
+
+def test_drop_capital_is_the_scans_picture_over_its_letter_and_spaced_titles_are_spaced():
+    layout = PageLayout(width=1000, height=1000, line_height=30)
+    layout.zones = [Zone("column", Box(100, 100, 900, 600), 0), Zone("dropcap", Box(100, 100, 180, 190), 0)]
+    rows = [("L1", "THE first line beside it", 100, 100), ("L2", "and the second one too", 140, 200),
+            ("L3", "then the full width lines go on and on here", 180, 100)]
+    lines = [Line(i, t, Box(x, y, 900, y + 30), [], "column0") for i, t, y, x in rows]  # L1 takes in the capital
+    title = Line("T1", "TITLE", Box(300, 40, 700, 80), [], "column0", glyph=40, spacing=0.6)
+    items = [Item("column0", "TITLE", ["T1"], "heading", align="center"),
+             Item("column0", "THE first line beside it and the second one too then the full width lines go on and on here",
+                  ["L1", "L2", "L3"], drop_cap="T")]
+    blocks = build_blocks(items, lines + [title], layout, {"dropcap0": "pictures/p_cap0.png"}, 1000, 1000)
+    cap = next(b for b in blocks if b.item and b.item.kind == "dropcap")
+    assert cap.picture == "pictures/p_cap0.png"
+    heading = next(b for b in blocks if b.item and b.item.kind == "heading")
+    assert heading.letter_spacing > 0.1
+    page = blocks_html(blocks, 1000, 1000)
+    assert '<img class="pic" src="pictures/p_cap0.png"' in page
+    assert "color: rgba(0, 0, 0, 0);" in page and ">T</p>" in page  # the letter, invisible: found and copied
+    assert "letter-spacing:" in page

@@ -203,7 +203,8 @@ class Structurer:
         key = f"{self.model}\n{self.system}\n{prompt}"
         same = (pw / "prompt.txt").exists() and (pw / "prompt.txt").read_text(encoding="utf-8") == key
         answer, result = (claude_cli.answer_of(pw / "response.jsonl")[0] if same else None), {"num_turns": 0}
-        if answer is None:
+        items = to_items(answer, r["lines"], r["layout"]) if answer else None
+        for _ in range(2 if items is None else 0):  # asked again once: an answer may stop halfway
             if self.limited.is_set():
                 return None, {"error": "not sent: the usage limit was reached"}
             (pw / "prompt.txt").write_text(key, encoding="utf-8")
@@ -213,7 +214,9 @@ class Structurer:
                                             thinking=self.thinking)
             if answer is None and LIMIT_HIT.search(str(result.get("result") or result.get("error") or "")):
                 self.limited.set()
-        items = to_items(answer, r["lines"], r["layout"]) if answer else None
+            items = to_items(answer, r["lines"], r["layout"]) if answer else None
+            if items is not None:
+                break
         if items is None:
             log.warning(f"{r['name']}: no usable answer ({result.get('subtype') or result.get('error') or result.get('result') or 'lost text'}); heuristic structure")
         else:

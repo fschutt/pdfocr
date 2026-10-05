@@ -175,6 +175,8 @@ def _large_shapes(stats: np.ndarray, large: np.ndarray, lh: float, width: int) -
                   & (stats[:, 1] >= box.y0) & (stats[:, 1] + stats[:, 3] <= box.y1))
         if stats[inside, 4].sum() >= MIN_PICTURE_INK * box.w * box.h:
             kept.append(box)
+        elif box.w <= 16 * lh and box.h <= 16 * lh:
+            initials.append(box)  # a plain capital as tall as eight lines: a drop capital, if a column's
         else:
             large_type[inside & large] = True
     return kept, initials, large_type

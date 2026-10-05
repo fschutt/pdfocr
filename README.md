@@ -270,8 +270,11 @@ pdf-ocr-bench reconstruct scan.pdf -o out --pages 1-20 --lang enm \
 6. **HTML**: every paragraph at the place of its first line, as wide as its column (beside the
    margin notes in it), justified and hyphenated, in Times at one size per column (the size at
    which it wraps to its original number of lines, at the original line pitch); notes at one
-   size beside the line they annotate; a drop capital as a letter with the lines beside it
-   narrowed. Then a render-and-measure loop (`html2pdf --layout-report`, only the pages that
+   size beside the line they annotate; a drop capital as the scan's own letter (plain or
+   ornamented, cut out as an image over the letter as invisible text, so it is still found and
+   copied) with the lines beside it narrowed; a letter-spaced title line (gaps between its
+   glyphs over a quarter of their height) at the size of its glyphs, `letter-spacing` filling
+   its printed width. Then a render-and-measure loop (`html2pdf --layout-report`, only the pages that
    changed) sets smaller whatever still runs into the block below or past its box. The PDF is
    rendered with `--long-s repair` for English.
 
@@ -287,7 +290,8 @@ through, to the model's instructions.
 `layout.json`, `lines.json` and the LLM's prompt and answer; an answer is reused as long as the
 page's zones and lines (and the model and instructions) are unchanged, so a run that stopped is
 continued by running it again. When the subscription's usage limit is hit, no further pages are
-sent; they get the heuristic structure until the next run. A page is one request of about
+sent; they get the heuristic structure until the next run. An answer that leaves out more than
+15% of the page's text (the model stopped halfway) is asked for once more. A page is one request of about
 0.5 MB of images, sent twice (the answer, and the structured-output turn): about 1 MB.
 
 ## Correcting with an LLM

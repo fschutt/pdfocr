@@ -56,6 +56,8 @@ class Line:
     box: Box  # native px
     words: list[tuple[str, Box]] = field(default_factory=list)
     zone: str = ""
+    glyph: float = 0.0  # median height of its glyphs in the scan, native px
+    spacing: float = 0.0  # median gap between its glyphs, in glyph heights (letter-spaced: > 0.25)
 
 
 @dataclass
@@ -188,6 +190,28 @@ def recover_missed(lines: list[Line], layout: PageLayout, image: Path, engine, w
     return out
 
 
+SPACED = 0.25  # gaps between glyphs in glyph heights: 0.04-0.12 in text, 0.3-1.5 letter-spaced
+TIMES_CAP, TIMES_X = 0.662, 0.448  # cap height and x-height of Times, em
+
+
+def measure_glyphs(lines: list[Line], native: Path) -> None:
+    """Each line's glyph height and the gaps between its glyphs, from the scan's ink."""
+    import cv2
+    import numpy as np
+
+    gray = cv2.imread(str(native), cv2.IMREAD_GRAYSCALE)
+    _, ink = cv2.threshold(gray, 0, 1, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
+    for line in lines:
+        b = line.box
+        _, _, stats, _ = cv2.connectedComponentsWithStats(ink[b.y0:b.y1, b.x0:b.x1], connectivity=8)
+        glyphs = sorted((x, x + w, h) for x, y, w, h, a in stats[1:] if a >= 8 and h >= 0.3 * b.h)
+        if len(glyphs) < 4:
+            continue
+        line.glyph = float(np.median([g[2] for g in glyphs]))
+        gaps = [max(0, nxt[0] - cur[1]) for cur, nxt in zip(glyphs, glyphs[1:])]
+        line.spacing = float(np.median(gaps)) / max(line.glyph, 1.0)
+
+
 def assign(lines: list[Line], layout: PageLayout) -> list[Line]:
     """Every line in the zone its words stand in; a line Vision ran across two zones (a note
     and the text beside it) is split into one line per zone."""
@@ -227,8 +251,8 @@ def clip_pictures(native: Path, layout: PageLayout, out_dir: Path, page_name: st
 
     paths = {}
     with Image.open(native) as im:
-        for z in layout.of("picture"):
-            name = f"pictures/{page_name}_{z.index}.png"
+        for z in layout.of("picture") + layout.of("dropcap"):  # a drop capital is set as cut from the scan
+            name = f"pictures/{page_name}_{'cap' if z.role == 'dropcap' else ''}{z.index}.png"
             target = out_dir / name
             target.parent.mkdir(parents=True, exist_ok=True)
             im.crop((z.box.x0, z.box.y0, z.box.x1, z.box.y1)).save(target, optimize=True)
@@ -358,6 +382,7 @@ class Block:
     limit: float = 0.0  # the lowest its text may reach (the next block below it in its zone)
     fit: tuple | None = None  # (lines in the scan, size to start from, line pitch) for sizing
     start_size: float = 0.0  # the size before the fit loop
+    letter_spacing: float = 0.0  # em
 
 
 def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictures: dict[str, str],
@@ -374,6 +399,8 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
 
     blocks: list[Block] = []
     for zid, rel in pictures.items():
+        if zones[zid].role != "picture":
+            continue  # a drop capital: with the paragraph it opens
         b = zones[zid].box
         blocks.append(Block(None, b.x0 * px, b.y0 * px, b.w * px, picture=rel, h=b.h * px))
 
@@ -409,8 +436,20 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
         if item.kind == "heading" and len(group) == 1:
             # one line as printed: its own box, the size that spans it
             x0, w = first.box.x0 * px, first.box.w * px
-            size = min(1.1 * size0, w / max(font.text_length(item.text, 1.0), 0.1))
-            blocks.append(Block(item, x0, top, max(w, 1.0) * 1.02, size, 1.2 * size, "left", nowrap=True))
+            face = _times(item.italic)
+            size = min(1.1 * size0, w / max(face.text_length(item.text, 1.0), 0.1))
+            spacing = 0.0
+            if first.spacing > SPACED and first.glyph and len(item.text) > 2:
+                # letter-spaced (D I C T I O N A R Y): the size of its glyphs, the rest of the
+                # printed width between the letters
+                letters = [c for c in item.text if c.isalpha()]
+                caps = sum(c.isupper() for c in letters) >= 0.5 * max(len(letters), 1)
+                em = first.glyph * px / (TIMES_CAP if caps else TIMES_X)
+                natural = face.text_length(item.text, em)
+                if natural < w:
+                    size, spacing = em, (w - natural) / em / len(item.text)
+            blocks.append(Block(item, x0, top, max(w, 1.0) * 1.02, size, 1.2 * size, "left", nowrap=True,
+                                letter_spacing=spacing))
             continue
         if item.kind == "note" and zone.role != "notes":
             # a note the layout did not set apart (in a column's margin): as wide as its own lines
@@ -432,14 +471,22 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
         text = item.text
         if item.drop_cap and text.startswith(item.drop_cap):
             lh = layout.line_height
+            # the capital left of the paragraph's first line, or in it (Vision may read it as the
+            # line's first letter)
             cap = next((c for c in layout.of("dropcap")
                         if c.box.y0 - lh <= first.box.y0 <= c.box.y1
-                        and first.box.x0 - 3 * lh <= c.box.x1 <= first.box.x0 + lh), None)
+                        and c.box.x0 - 2 * lh <= first.box.x0 <= c.box.x1 + 3 * lh), None)
             if cap is not None:
                 k = max(1, len([l for l in group if l.box.y0 < cap.box.y1 - 0.3 * layout.line_height]))
                 cap_size = cap.box.h * px * 0.95
+                # the scan's own capital (plain or ornamented), over the letter as invisible text
                 blocks.append(Block(Item(item.zone, item.drop_cap, [], "dropcap"), cap.box.x0 * px, cap.box.y0 * px,
-                                    cap.box.w * px * 1.1, cap_size, cap_size, "left", nowrap=True))
+                                    cap.box.w * px * 1.1, cap_size, cap_size, "left", nowrap=True,
+                                    picture=pictures.get(cap.id, ""), h=cap.box.h * px))
+                if first.box.x0 < cap.box.x1:
+                    # Vision's box of the first line takes in the capital: the line's own top is
+                    # where the capital's top is (it stands on the first line's cap height)
+                    top = cap.box.y0 * px - 0.28 * size0
                 # the lines beside the capital: narrower, starting right of it
                 beside_text, rest_text = _split_text(text[len(item.drop_cap):].lstrip(), k, group)
                 bx0 = cap.box.x1 * px + 0.3 * size0
@@ -503,10 +550,12 @@ def blocks_html(blocks: list[Block], width_pt: float, height_pt: float, lang: st
     parts = []
     for b in blocks:
         if b.picture:
-            parts.append(f'<img class="pic" src="{b.picture}" style="{_pos(b.x, b.y, b.w, height_pt, width_pt)} '
+            w = b.w / 1.1 if b.item is not None else b.w  # a drop capital's box has room to spare
+            parts.append(f'<img class="pic" src="{b.picture}" style="{_pos(b.x, b.y, w, height_pt, width_pt)} '
                          f'height: {100 * b.h / height_pt:.4f}%;">')
-        else:
-            parts.append(_block(b.item, b.x, b.y, b.w, b.size, b.line_h, b.align, width_pt, height_pt, b.indent, b.nowrap))
+        if b.item is not None:
+            parts.append(_block(b.item, b.x, b.y, b.w, b.size, b.line_h, b.align, width_pt, height_pt, b.indent, b.nowrap,
+                                b.letter_spacing, invisible=bool(b.picture)))
     return f"""<!DOCTYPE html>
 <html lang="{htmlmod.escape(lang)}">
 <head>
@@ -541,12 +590,17 @@ def _pos(x: float, y: float, w: float, height_pt: float, width_pt: float) -> str
 
 
 def _block(item: Item, x: float, y: float, w: float, size: float, line_h: float, align: str,
-           width_pt: float, height_pt: float, indent: float = 0.0, nowrap: bool = False) -> str:
+           width_pt: float, height_pt: float, indent: float = 0.0, nowrap: bool = False,
+           letter_spacing: float = 0.0, invisible: bool = False) -> str:
     style = _pos(x, y, w, height_pt, width_pt) + f" font-size: {size:.2f}pt; line-height: {line_h:.2f}pt; text-align: {align};"
     if item.italic:
         style += " font-style: italic;"
     if nowrap:
         style += " white-space: nowrap;"
+    if letter_spacing:
+        style += f" letter-spacing: {letter_spacing:.3f}em;"
+    if invisible:  # the text of a letter drawn as a picture: there to be found and copied
+        style += " color: rgba(0, 0, 0, 0);"
     p_style = f' style="text-indent: {indent:.1f}pt;"' if indent else ""
     attrs = f'data-zone="{item.zone}" data-role="{item.kind}"' + (f' data-lines="{" ".join(item.lines)}"' if item.lines else "")
     return f'<div class="region" {attrs} style="{style}"><p{p_style}>{htmlmod.escape(item.text)}</p></div>'
@@ -650,6 +704,7 @@ def prepare_page(pdf_path: Path, n: int, out: Path, lang: tuple[str, ...]) -> di
     read = vision_lines(pw / "vision.png", lang, native, engine)
     recovered = recover_missed(read, layout, pw / "vision.png", engine, pw)
     lines = assign(read + recovered, layout)
+    measure_glyphs(lines, pw / "native.png")
     for old in (out / "pictures").glob(f"{name}_*.png"):  # from an earlier run's layout
         old.unlink()
     pictures = clip_pictures(pw / "native.png", layout, out, name)
@@ -695,6 +750,9 @@ def reconstruct(pdf_path: Path, out: Path, pages: list[int], lang: tuple[str, ..
     for n, r in sorted(results.items()):
         width_pt, height_pt = r["size"]
         page_blocks[n] = build_blocks(structures[n], r["lines"], r["layout"], r["pictures"], width_pt, height_pt)
+        used = {b.picture for b in page_blocks[n] if b.picture}
+        for rel in set(r["pictures"].values()) - used:  # a capital no paragraph opens with
+            (out / rel).unlink(missing_ok=True)
         pages_meta.append({"page_num": n, "html": f"{r['name']}.html", "width_pt": width_pt, "height_pt": height_pt,
                            "width_px": r["layout"].width, "height_px": r["layout"].height})
     metadata = {"engine": "reconstruct" + ("+" + model if llm else ""), "page_count": len(pages_meta), "pages": pages_meta}
