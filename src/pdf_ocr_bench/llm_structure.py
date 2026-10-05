@@ -5,12 +5,19 @@ The model gets the page's zones (from `page_layout`) with Vision's lines in each
 paragraph, a marginal note or a heading line, the corrected text of exactly those lines, a drop
 capital, the alignment. Lines it calls noise (OCR junk) are dropped. Placement stays with the
 geometry: an item is set where its first line was, as wide as its zone.
+
+`learnings` turns an earlier run (a larger model on the first pages) into extra instructions for
+the rest: the corrections it made most often, and one page worked through.
 """
 
 from __future__ import annotations
 
+import difflib
 import json
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import re
+import threading
+from collections import Counter
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
 from . import claude_cli
@@ -109,33 +116,116 @@ def to_items(answer: dict, lines: list, layout: PageLayout):
     return items
 
 
-def structure_pages(results: dict[int, dict], work: Path, semantic_context: str, model: str, agents: int,
-                    zoom: bool = False) -> dict[int, list]:
-    """{page index: items} for the pages the model answered; the others fall back to the heuristic."""
-    def one(n: int, r: dict):
-        pw = work / r["name"] / "llm"
+# `claude -p` ran into the subscription's limit: asking further pages only uploads them for nothing
+LIMIT_HIT = re.compile(r"usage limit|rate limit|limit reached|hit your limit|limit will reset|resets? at", re.I)
+PUNCT = ".,;:!?()[]'\"*"
+WORD = re.compile(r"[A-Za-z][A-Za-z']*")
+
+
+def _word_list() -> set[str]:
+    try:
+        from .reconstruct import WORD_LIST
+
+        return {w.strip().lower() for w in Path(WORD_LIST).read_text(encoding="utf-8").splitlines()}
+    except OSError:
+        return set()
+
+
+def learnings(source: Path, glossary: int = 150) -> str:
+    """Extra instructions from an earlier run (`source`, a reconstruct output directory): the OCR
+    words its model corrected most often, and one of its pages worked through. "" if it has none."""
+    fixes: Counter = Counter()
+    pages = []
+    # only misreadings that are no word: "whole -> whose" or "fame -> same" was right on its page,
+    # as a rule it would turn every correct "whole" into a mistake
+    words = _word_list()
+    for pw in sorted((source / "work").glob("page_*")):
+        answer, _ = claude_cli.answer_of(pw / "llm" / "response.jsonl")
+        if not answer or not (pw / "lines.json").exists() or not (pw / "llm" / "prompt.txt").exists():
+            continue
+        text_of = {l["id"]: l["text"] for l in json.loads((pw / "lines.json").read_text(encoding="utf-8"))}
+        for item in answer.get("items", []):
+            if item.get("kind") == "noise":
+                continue
+            ocr = " ".join(text_of.get(i, "") for i in item.get("lines", [])).split()
+            fixed = item.get("text", "").split()
+            for op, a0, a1, b0, b1 in difflib.SequenceMatcher(a=ocr, b=fixed, autojunk=False).get_opcodes():
+                if op != "replace" or a1 - a0 != b1 - b0:
+                    continue  # a word joined across a line-end hyphen, a note left out: not a misreading
+                for x, y in zip(ocr[a0:a1], fixed[b0:b1]):
+                    x, y = x.strip(PUNCT), y.strip(PUNCT)
+                    if (len(x) >= 3 and x.lower() != y.lower() and abs(len(x) - len(y)) <= 2
+                            and WORD.fullmatch(x) and WORD.fullmatch(y) and x.lower() not in words):
+                        fixes[(x, y)] += 1
+        prompt = (pw / "llm" / "prompt.txt").read_text(encoding="utf-8")
+        at = prompt.find("The page's zones and OCR lines")
+        if at >= 0:
+            kinds = {i.get("kind") for i in answer["items"]} | ({"drop_cap"} if any(i.get("drop_cap") for i in answer["items"]) else set())
+            pages.append((len(kinds), -len(prompt), prompt[at:], answer))
+    if not fixes and not pages:
+        return ""
+    parts = []
+    if fixes:
+        common = sorted(fixes.items(), key=lambda kv: (-kv[1], kv[0]))[:glossary]
+        parts.append("Corrections made on earlier pages of this book (OCR -> as printed), most frequent first; "
+                     "the same misreadings recur:\n" + ", ".join(f"{x} -> {y}" for (x, y), _ in common))
+    if pages:
+        # the page that shows the most kinds of item, the shorter of equals
+        _, _, prompt, answer = max(pages, key=lambda p: (p[0], p[1]))
+        parts.append("An earlier page worked through (its zones and OCR lines, then the answer). Answer every "
+                     "page the same way, from its own lines and images:\n<example_page>\n" + prompt +
+                     "\n</example_page>\n<example_answer>\n" + json.dumps(answer, ensure_ascii=False) +
+                     "\n</example_answer>")
+    return "\n\n".join(parts)
+
+
+class Structurer:
+    """Asks the model about each page as soon as it is read (`submit`), `agents` pages at a time;
+    `collect` waits for the answers. An answer is reused while the page's zones and lines (and
+    the model, instructions and context) stay the same. After the subscription's usage limit is
+    hit, pages are no longer sent (they fall back to the heuristic; run again later)."""
+
+    def __init__(self, work: Path, semantic_context: str, model: str, agents: int, zoom: bool = False,
+                 guide: str = "", thinking: bool = True):
+        self.work, self.context, self.model, self.zoom, self.thinking = work, semantic_context, model, zoom, thinking
+        self.system = SYSTEM + (f"\n\n{guide}" if guide else "")
+        self.pool = ThreadPoolExecutor(max_workers=max(1, agents))
+        self.jobs: dict[int, Future] = {}
+        self.limited = threading.Event()
+
+    def submit(self, n: int, r: dict) -> None:
+        self.jobs[n] = self.pool.submit(self._one, r)
+
+    def _one(self, r: dict):
+        pw = self.work / r["name"] / "llm"
         pw.mkdir(parents=True, exist_ok=True)
-        prompt = page_prompt(r["layout"], r["lines"], semantic_context)
-        # an earlier answer counts only for the same zones and lines (and model and context)
-        key = f"{model}\n{SYSTEM}\n{prompt}"
+        prompt = page_prompt(r["layout"], r["lines"], self.context)
+        key = f"{self.model}\n{self.system}\n{prompt}"
         same = (pw / "prompt.txt").exists() and (pw / "prompt.txt").read_text(encoding="utf-8") == key
         answer, result = (claude_cli.answer_of(pw / "response.jsonl")[0] if same else None), {"num_turns": 0}
         if answer is None:
+            if self.limited.is_set():
+                return None, {"error": "not sent: the usage limit was reached"}
             (pw / "prompt.txt").write_text(key, encoding="utf-8")
-            content, _ = claude_cli.page_content(work / r["name"] / "native.png", pw)
+            content, _ = claude_cli.page_content(self.work / r["name"] / "native.png", pw)
             content.append({"type": "text", "text": prompt})
-            answer, result = claude_cli.ask(content, SYSTEM, SCHEMA, pw, model, zoom=zoom)
+            answer, result = claude_cli.ask(content, self.system, SCHEMA, pw, self.model, zoom=self.zoom,
+                                            thinking=self.thinking)
+            if answer is None and LIMIT_HIT.search(str(result.get("result") or result.get("error") or "")):
+                self.limited.set()
         items = to_items(answer, r["lines"], r["layout"]) if answer else None
-        return n, items, result
+        if items is None:
+            log.warning(f"{r['name']}: no usable answer ({result.get('subtype') or result.get('error') or result.get('result') or 'lost text'}); heuristic structure")
+        else:
+            took = f", {result['duration_ms'] / 1000:.0f}s" if result.get("duration_ms") else ""
+            log.info(f"{r['name']}: {len(items)} items from {self.model} ({result.get('num_turns', 0)} turns{took})")
+        return items, result
 
-    out: dict[int, list] = {}
-    with ThreadPoolExecutor(max_workers=max(1, agents)) as pool:
-        for job in as_completed([pool.submit(one, n, r) for n, r in results.items()]):
-            n, items, result = job.result()
-            name = results[n]["name"]
-            if items is None:
-                log.warning(f"{name}: no usable answer ({result.get('subtype') or result.get('error') or 'lost text'}); heuristic structure")
-                continue
-            out[n] = items
-            log.info(f"{name}: {len(items)} items from {model} ({result.get('num_turns', 0)} turns)")
-    return out
+    def collect(self) -> dict[int, list]:
+        """{page index: items} for the pages the model answered."""
+        out = {n: items for n, job in sorted(self.jobs.items()) if (items := job.result()[0]) is not None}
+        self.pool.shutdown()
+        if self.limited.is_set():
+            log.warning(f"The usage limit was reached: {len(self.jobs) - len(out)} pages have the heuristic structure. "
+                        "Run the same command again later; answered pages are kept.")
+        return out

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -83,8 +84,12 @@ def answer_of(transcript: Path) -> tuple[dict | None, dict]:
 
 
 def ask(content: list[dict], system: str, schema: dict, work: Path, model: str, zoom: bool = False,
-        max_turns: int = 60, timeout: int = 900, name: str = "response") -> tuple[dict | None, dict]:
-    """One `claude -p` with `content` as the user message; its transcript is kept in `work`."""
+        max_turns: int = 60, timeout: int = 900, name: str = "response",
+        thinking: bool = True) -> tuple[dict | None, dict]:
+    """One `claude -p` with `content` as the user message; its transcript is kept in `work`.
+
+    `thinking=False` answers without extended thinking: Haiku otherwise thinks some 20k tokens
+    about a page before a 2k-token answer, minutes instead of seconds."""
     claude = shutil.which("claude")
     if claude is None:
         return None, {"error": "claude is not on PATH"}
@@ -102,7 +107,8 @@ def ask(content: list[dict], system: str, schema: dict, work: Path, model: str, 
     message = json.dumps({"type": "user", "message": {"role": "user", "content": content}})
     transcript = work / f"{name}.jsonl"
     try:
-        proc = subprocess.run(cmd, cwd=work, input=message, capture_output=True, text=True, timeout=timeout)
+        env = {**os.environ, **({} if thinking else {"MAX_THINKING_TOKENS": "0"})}
+        proc = subprocess.run(cmd, cwd=work, input=message, capture_output=True, text=True, timeout=timeout, env=env)
     except subprocess.TimeoutExpired:
         return None, {"error": f"timed out after {timeout}s"}
     transcript.write_text(proc.stdout, encoding="utf-8")

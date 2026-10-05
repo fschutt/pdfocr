@@ -95,6 +95,45 @@ pub fn rewrite_texts(html: &str, mut f: impl FnMut(&str) -> String) -> String {
     out
 }
 
+/// The page with every word of its text blocks (`<div class="region">`, as `pdf-ocr-bench
+/// reconstruct` writes them) replaced by `f(word)`; markup and spacing are kept.
+pub fn rewrite_region_texts(html: &str, mut f: impl FnMut(&str) -> String) -> String {
+    const OPEN: &str = "<div class=\"region\"";
+    let mut out = String::with_capacity(html.len());
+    let mut pos = 0;
+    while let Some(i) = html[pos..].find(OPEN) {
+        let start = pos + i;
+        let end = html[start..].find("</div>").map_or(html.len(), |e| start + e);
+        out.push_str(&html[pos..start]);
+        // the text between the block's tags, word by word
+        let mut rest = &html[start..end];
+        while let Some(gt) = rest.find('>') {
+            out.push_str(&rest[..=gt]);
+            rest = &rest[gt + 1..];
+            let text_end = rest.find('<').unwrap_or(rest.len());
+            let text = unescape(&rest[..text_end]);
+            let mut word = String::new();
+            for c in text.chars().chain(std::iter::once(' ')) {
+                if c.is_whitespace() {
+                    if !word.is_empty() {
+                        out.push_str(&escape(&f(&word)));
+                        word.clear();
+                    }
+                    out.push(c);
+                } else {
+                    word.push(c);
+                }
+            }
+            out.pop(); // the space chained on
+            rest = &rest[text_end..];
+        }
+        out.push_str(rest);
+        pos = end;
+    }
+    out.push_str(&html[pos..]);
+    out
+}
+
 /// The `lang` attribute of the page's `<html>` element.
 pub fn html_lang(html: &str) -> Option<&str> {
     let tag = &html[html.find("<html")?..];
@@ -219,6 +258,16 @@ mod tests {
         assert!(out.contains(">should </span>"));
         assert!(out.contains(">Moses&#39;s</span>"));
         assert_eq!(out.len(), PAGE.len() - 2); // 'ſ' is 2 bytes, 's' 1
+    }
+
+    #[test]
+    fn rewrites_the_words_of_text_blocks() {
+        let page = r#"<div class="page"><div class="region" style="left: 1%;"><p style="text-indent: 9pt;">to addrefs  Thefe &amp; ſo</p></div><img class="pic" src="a.png"></div>"#;
+        let out = rewrite_region_texts(page, |w| w.replace('f', "s").replace('ſ', "s"));
+        assert_eq!(
+            out,
+            r#"<div class="page"><div class="region" style="left: 1%;"><p style="text-indent: 9pt;">to address  These &amp; so</p></div><img class="pic" src="a.png"></div>"#
+        );
     }
 
     #[test]

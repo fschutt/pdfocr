@@ -27,6 +27,7 @@ from pathlib import Path
 import numpy as np
 
 ROLES = ("header", "column", "notes", "footnotes", "text", "picture", "dropcap")
+MIN_PICTURE_INK = 0.3  # share of a picture's box that is inked
 
 
 @dataclass(frozen=True)
@@ -74,6 +75,7 @@ class PageLayout:
     height: int
     line_height: float  # lh: median glyph height of the page's text, px
     zones: list[Zone] = field(default_factory=list)
+    words: list[Box] = field(default_factory=list)  # inked words (outside pictures and initials)
 
     def of(self, role: str) -> list[Zone]:
         return [z for z in self.zones if z.role == role]
@@ -118,7 +120,8 @@ def analyse(path: Path) -> PageLayout:
 
     blocks: list[tuple[Box, str]] = []
     _split(text, words, _tight(text, Box(0, 0, width, height)), lh, blocks)
-    layout = PageLayout(width=width, height=height, line_height=lh)
+    layout = PageLayout(width=width, height=height, line_height=lh,
+                        words=[Box(int(a), int(b), int(c), int(d)) for a, b, c, d in words])
     layout.zones = _roles(blocks, stats[~specks & ~large], stats[rules], pictures, initials, lh, height)
     return layout
 
@@ -163,7 +166,18 @@ def _large_shapes(stats: np.ndarray, large: np.ndarray, lh: float, width: int) -
         else:
             initials.append(box)
     # an engraving's frame may enclose a few separate groups: merge pictures that overlap
-    return _merge_overlapping(pictures, lh), initials, large_type
+    pictures = _merge_overlapping(pictures, lh)
+    # an engraving or ornament is dense (45-60% of its box inked); big title letters with a
+    # library mark written across them are not (20%): they stay text
+    kept = []
+    for box in pictures:
+        inside = ((stats[:, 0] >= box.x0) & (stats[:, 0] + stats[:, 2] <= box.x1)
+                  & (stats[:, 1] >= box.y0) & (stats[:, 1] + stats[:, 3] <= box.y1))
+        if stats[inside, 4].sum() >= MIN_PICTURE_INK * box.w * box.h:
+            kept.append(box)
+        else:
+            large_type[inside & large] = True
+    return kept, initials, large_type
 
 
 def _merge_overlapping(boxes: list[Box], lh: float) -> list[Box]:

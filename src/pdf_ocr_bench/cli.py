@@ -102,12 +102,19 @@ def run_cmd(input_pdf, output_dir, engines, lang, dpi, pages, preprocess, engine
 @click.option("--lang", default="eng", show_default=True, help=LANG_HELP)
 @click.option("--semantic-context", default="", help="What the book is, for the LLM, e.g. 'an English dictionary of the Bible, printed 1732'")
 @click.option("--model", default="sonnet", show_default=True, help="claude -p model for the structure")
-@click.option("--agents", type=click.IntRange(1), default=4, show_default=True, help="pages asked at once")
+@click.option("--agents", type=click.IntRange(1), default=8, show_default=True, help="pages asked at once")
+@click.option("--workers", type=click.IntRange(1), default=4, show_default=True,
+              help="processes that render, analyse and read pages (Vision) at once")
 @click.option("--no-llm", is_flag=True, help="structure from the line geometry only (no upload)")
 @click.option("--zoom", is_flag=True, help="let the LLM crop and zoom into the scan (several MB of upload per page)")
-@click.option("--fit-rounds", type=click.IntRange(0), default=6, show_default=True, help="render-and-shrink rounds (needs html2pdf)")
+@click.option("--fit-rounds", type=click.IntRange(0), default=10, show_default=True, help="render-and-shrink rounds (needs html2pdf)")
+@click.option("--learn-from", type=click.Path(exists=True, file_okay=False, path_type=Path), default=None,
+              help="an earlier reconstruct output (e.g. a larger model on the first pages): its most frequent "
+                   "corrections and one worked page go into the model's instructions")
+@click.option("--thinking/--no-thinking", default=True, show_default=True,
+              help="let the model think before it answers (--no-thinking: much faster, e.g. with haiku)")
 @click.option("-v", "--verbose", is_flag=True)
-def reconstruct_cmd(input_pdf, output_dir, pages, lang, semantic_context, model, agents, no_llm, zoom, fit_rounds, verbose) -> None:
+def reconstruct_cmd(input_pdf, output_dir, pages, lang, semantic_context, model, agents, workers, no_llm, zoom, fit_rounds, learn_from, thinking, verbose) -> None:
     """Rebuild scanned pages as structured HTML: OpenCV layout, macOS Vision text, an LLM's structure.
 
     Writes OUTPUT_DIR/pages.zip for html2pdf (columns, notes beside their lines, drop capitals,
@@ -128,8 +135,16 @@ def reconstruct_cmd(input_pdf, output_dir, pages, lang, semantic_context, model,
     route = ENGINES["macos_vision"].preflight(ENGINES["macos_vision"].route(languages))
     if not route.ok:
         raise click.UsageError(f"reconstruct reads the text with macOS Vision: {route.unsupported}")
+    guide = ""
+    if learn_from is not None:
+        from .llm_structure import learnings
+
+        guide = learnings(learn_from)
+        if not guide:
+            raise click.UsageError(f"--learn-from {learn_from}: no answered pages in its work/ directory")
     reconstruct(input_pdf, output_dir, selected, route.lang, html_lang(languages), semantic_context,
-                llm=not no_llm, model=model, agents=agents, fit_rounds=fit_rounds, zoom=zoom)
+                llm=not no_llm, model=model, agents=agents, fit_rounds=fit_rounds, zoom=zoom, guide=guide,
+                thinking=thinking, workers=workers)
 
 
 @main.command("check")

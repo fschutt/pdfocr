@@ -109,3 +109,35 @@ def test_answer_is_checked_against_the_ocr_lines():
     assert items[1].zone == "column0"  # an unknown zone: the zone its lines are in
     lost = {"items": [{"zone": "column0", "kind": "paragraph", "lines": ["L3"], "text": "Second paragraph."}]}
     assert to_items(lost, lines, layout) is None  # most of the page's text left out
+
+
+def test_pitch_ignores_the_order_lines_are_listed_in_and_notes_keep_their_margin():
+    layout = PageLayout(width=1000, height=1000, line_height=30)
+    layout.zones = [Zone("column", Box(100, 100, 900, 600), 0)]
+    rows = [(f"L{i}", f"line {i} of the paragraph with some words", 100 + 40 * i) for i in range(8)]
+    lines = [Line(i, t, Box(220, y, 900, y + 30), [], "column0") for i, t, y in rows]
+    lines.append(Line("N1", "A note.", Box(100, 140, 190, 170), [], "column0"))
+    order = ["L0", "L7", "L1", "L2", "L3", "L4", "L5", "L6"]  # the last line listed second
+    items = [Item("column0", " ".join(l.text for l in lines[:8]), order),
+             Item("column0", "A note.", ["N1"], "note")]
+    blocks = build_blocks(items, lines, layout, {}, 1000, 1000)
+    para = next(b for b in blocks if b.item.kind == "paragraph")
+    assert para.line_h == pytest.approx(40, abs=1)  # the printed pitch, not (y7 - y0) / 7 of the listed order
+    assert para.x >= 190  # beside the note, not under it
+
+
+def test_learnings_keep_misreadings_that_are_no_words(tmp_path):
+    import json
+
+    from pdf_ocr_bench.llm_structure import learnings
+
+    pw = tmp_path / "work" / "page_001"
+    (pw / "llm").mkdir(parents=True)
+    (pw / "lines.json").write_text(json.dumps([{"id": "L1", "text": "He muft fee the whole Hiftory"}]))
+    (pw / "llm" / "prompt.txt").write_text("sonnet\nSYSTEM\nThe page's zones and OCR lines (boxes X Y W H on page.png):\n\n[]")
+    answer = {"items": [{"zone": "column0", "kind": "paragraph", "lines": ["L1"], "text": "He must see the whose History"}]}
+    (pw / "llm" / "response.jsonl").write_text(json.dumps({"type": "result", "structured_output": answer}) + "\n")
+    guide = learnings(tmp_path)
+    assert "muft -> must" in guide and "Hiftory -> History" in guide
+    assert "whole -> whose" not in guide and "fee -> see" not in guide  # words: right only on their page
+    assert "<example_answer>" in guide

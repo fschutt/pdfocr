@@ -249,7 +249,7 @@ heads, footnotes, and the pictures cut out of the scan.
 ```sh
 pdf-ocr-bench reconstruct scan.pdf -o out --pages 1-20 --lang enm \
     --semantic-context "An English translation of Calmet's Dictionary of the Holy Bible, printed 1732"
-cargo run --release --manifest-path html2pdf/Cargo.toml -- out/pages.zip -o out.pdf
+# -> out/pages.zip, and out/out.pdf (html2pdf, built under html2pdf/target/release)
 ```
 
 1. **Render** each page at the resolution of its scan, and at 3/4 of it for Vision (scaling a
@@ -258,22 +258,37 @@ cargo run --release --manifest-path html2pdf/Cargo.toml -- out/pages.zip -o out.
    marginal-note strips, footnotes, other text blocks (titles, captions), pictures and drop
    capitals. Columns are cut at gutters, the x ranges only a few words cross; the lines that do
    cross one (a running head, a centred title, a footnote) become full-width blocks first.
-3. **Text**: macOS Vision reads the lines (on the device); every word goes to its zone.
+3. **Text**: macOS Vision reads the lines (on the device); every word goes to its zone. Vision
+   sometimes skips a whole line (an italic line under a handwritten mark, two lines between title
+   lines); inked words no line covers are read again from a strip cut around them.
 4. **Pictures** are cut out of the scan as PNGs and placed as images.
 5. **Structure**: an LLM (`claude -p`, `--model sonnet`, `--agents` pages at once) gets the zones
    with their OCR lines and the scan (reduced, and as 8 full-resolution tiles), plus
    `--semantic-context`. It answers which lines make a paragraph, a note or a heading line, the
    corrected text (long s, misread letters), and drop capitals. `--no-llm` uses a heuristic
    from the line geometry instead (nothing is uploaded). `--zoom` lets the model crop the scan.
-6. **HTML**: every paragraph at the place of its first line, as wide as its column, justified,
-   in Times at one size per column (the size at which it wraps to its original number of
-   lines); notes at one size beside the line they annotate; a drop capital as a letter with
-   the lines beside it narrowed. Then a render-and-measure loop (`html2pdf --layout-report`)
-   sets smaller whatever still runs into the block below.
+6. **HTML**: every paragraph at the place of its first line, as wide as its column (beside the
+   margin notes in it), justified and hyphenated, in Times at one size per column (the size at
+   which it wraps to its original number of lines, at the original line pitch); notes at one
+   size beside the line they annotate; a drop capital as a letter with the lines beside it
+   narrowed. Then a render-and-measure loop (`html2pdf --layout-report`, only the pages that
+   changed) sets smaller whatever still runs into the block below or past its box. The PDF is
+   rendered with `--long-s repair` for English.
+
+Steps 1-4 run in `--workers` processes (4: about 1.1 s a page on an M-series Mac); each page goes
+to the model as soon as it is read, `--agents` (8) at a time. Sonnet answers a page in about
+20 s, so the model sets the pace: about 2.6 s a page, a 1000-page volume in about 45 minutes.
+Haiku is no faster here: it thinks some 20k tokens about a page (minutes), and with
+`--no-thinking` it modernises spellings and drops words. `--learn-from DIR` adds an earlier
+run's most frequent corrections (OCR words that are no words) and one of its pages, worked
+through, to the model's instructions.
 
 `out/work/page_NNN/` keeps each page's renders, `layout.png` (the zones drawn on the page),
 `layout.json`, `lines.json` and the LLM's prompt and answer; an answer is reused as long as the
-page's zones and lines are unchanged. Without zoom a page is one request of about 0.4 MB.
+page's zones and lines (and the model and instructions) are unchanged, so a run that stopped is
+continued by running it again. When the subscription's usage limit is hit, no further pages are
+sent; they get the heuristic structure until the next run. A page is one request of about
+0.5 MB of images, sent twice (the answer, and the structured-output turn): about 1 MB.
 
 ## Correcting with an LLM
 

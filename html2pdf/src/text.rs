@@ -113,6 +113,17 @@ fn base_forms(word: &str) -> Vec<String> {
             }
         }
     }
+    // British -our spellings, which an American word list has as -or: favour, favourable. Only
+    // at the end of the word (or before -able, -ite..): "fource" is "source", not "force".
+    for base in out.clone() {
+        for tail in ["", "able", "ably", "ite", "ites", "ful", "less"] {
+            if let Some(stem) = base.strip_suffix(&format!("our{tail}")) {
+                if stem.len() >= 2 {
+                    out.push(format!("{stem}or{tail}"));
+                }
+            }
+        }
+    }
     out
 }
 
@@ -273,6 +284,12 @@ mod tests {
         assert_eq!(fix("þ"), None);
         assert_eq!(fix("«hiftoryé»").as_deref(), None);
         assert_eq!(fix("«hiftory»").as_deref(), Some("«history»"));
+        // British -our spellings are words, though the list has them as -or
+        let d = Dictionary::from_words(["favor", "favorable", "savour", "source", "force"]);
+        assert_eq!(repair_f("favour", &d), None);
+        assert_eq!(repair_f("Favourable", &d), None);
+        assert_eq!(repair_f("favoured,", &d), None);
+        assert_eq!(repair_f("fource", &d).as_deref(), Some("source"));
     }
 
     #[test]

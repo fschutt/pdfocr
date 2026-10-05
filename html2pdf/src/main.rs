@@ -271,7 +271,9 @@ fn transform(
 ) -> String {
     match args.layout {
         Layout::Positioned if args.long_s == LongS::Keep => html.to_string(),
-        Layout::Positioned => words::rewrite_texts(html, |word| fixer.word(word)),
+        Layout::Positioned => {
+            words::rewrite_region_texts(&words::rewrite_texts(html, |word| fixer.word(word)), |word| fixer.word(word))
+        }
         Layout::Flow => {
             let lang = words::html_lang(html).unwrap_or("en").to_string();
             let (flowed, s) =

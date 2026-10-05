@@ -126,6 +126,68 @@ def vision_lines(image: Path, lang: tuple[str, ...], native: tuple[int, int], en
     return lines
 
 
+def recover_missed(lines: list[Line], layout: PageLayout, image: Path, engine, work: Path,
+                   max_strips: int = 12) -> list[Line]:
+    """Lines Vision left out of the whole page, read again from a strip of the page around them.
+
+    Vision sometimes skips a line (an italic line under a handwritten mark, two lines between
+    headings of a title page) that it reads from a crop. Inked words (OpenCV) that no Vision
+    line covers are grouped into strips; each strip is cropped from `image` and read alone.
+    """
+    from PIL import Image
+
+    from .models import PageImage
+
+    lh = layout.line_height
+    covered = [l.box for l in lines]
+    blocked = [z.box for z in layout.zones if z.role in ("picture", "dropcap")]
+
+    def is_covered(b: Box) -> bool:
+        cx, cy = (b.x0 + b.x1) / 2, (b.y0 + b.y1) / 2
+        return any(c.x0 - 0.3 * lh <= cx <= c.x1 + 0.3 * lh and c.y0 - 0.3 * lh <= cy <= c.y1 + 0.3 * lh
+                   for c in covered + blocked)
+
+    missed = sorted((b for b in layout.words if b.w >= 1.5 * lh and not is_covered(b)), key=lambda b: (b.y0, b.x0))
+    strips: list[Box] = []
+    for b in missed:  # words that share a line (more than half their height) make one strip
+        for i, s in enumerate(strips):
+            if min(s.y1, b.y1) - max(s.y0, b.y0) > 0.5 * min(s.h, b.h):
+                strips[i] = s.union(b)
+                break
+        else:
+            strips.append(b)
+    strips = [s for s in strips if s.w >= 3 * lh][:max_strips]
+    if not strips:
+        return []
+    out: list[Line] = []
+    with Image.open(image) as im:
+        scale = im.width / layout.width  # the Vision render is smaller than the native one
+        for k, s in enumerate(strips):
+            x0, y0 = max(0, s.x0 - lh), max(0, s.y0 - 0.6 * lh)
+            x1, y1 = min(layout.width, s.x1 + lh), min(layout.height, s.y1 + 0.6 * lh)
+            crop = im.crop((round(x0 * scale), round(y0 * scale), round(x1 * scale), round(y1 * scale)))
+            path = work / f"recover_{k + 1}.png"
+            crop.save(path)
+            page = PageImage(page_num=0, path=path, width_px=crop.width, height_px=crop.height, width_pt=1, height_pt=1, dpi=72)
+            by_line: dict[int, list] = {}
+            for word in engine.run(page).words:
+                by_line.setdefault(word.line if word.line is not None else -1, []).append(word)
+            for words in by_line.values():
+                words.sort(key=lambda w: w.bbox.x)
+                boxes = [Box(round(x0 + w.bbox.x * (x1 - x0)), round(y0 + w.bbox.y * (y1 - y0)),
+                             round(x0 + (w.bbox.x + w.bbox.w) * (x1 - x0)), round(y0 + (w.bbox.y + w.bbox.h) * (y1 - y0)))
+                         for w in words]
+                fresh = [(w, b) for w, b in zip(words, boxes) if not is_covered(b)]  # not read before
+                if not fresh:
+                    continue
+                box = fresh[0][1]
+                for _, b in fresh[1:]:
+                    box = box.union(b)
+                out.append(Line(f"L{len(lines) + len(out) + 1}", " ".join(w.text for w, _ in fresh), box,
+                                [(w.text, b) for w, b in fresh]))
+    return out
+
+
 def assign(lines: list[Line], layout: PageLayout) -> list[Line]:
     """Every line in the zone its words stand in; a line Vision ran across two zones (a note
     and the text beside it) is split into one line per zone."""
@@ -295,6 +357,7 @@ class Block:
     h: float = 0.0  # pictures only
     limit: float = 0.0  # the lowest its text may reach (the next block below it in its zone)
     fit: tuple | None = None  # (lines in the scan, size to start from, line pitch) for sizing
+    start_size: float = 0.0  # the size before the fit loop
 
 
 def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictures: dict[str, str],
@@ -314,6 +377,18 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
         b = zones[zid].box
         blocks.append(Block(None, b.x0 * px, b.y0 * px, b.w * px, picture=rel, h=b.h * px))
 
+    # margin notes the layout left inside a column: the text beside them starts right of (ends
+    # left of) them, so a paragraph does not run under its note
+    inner_notes = []
+    for it in items:
+        z, g = zones.get(it.zone), [by_id[i] for i in it.lines if i in by_id]
+        if it.kind != "note" or z is None or z.role == "notes" or not g:
+            continue
+        nx0, nx1 = min(l.box.x0 for l in g), max(l.box.x1 for l in g)
+        # narrow, at an edge of its column (a footnote under the text is neither)
+        if nx1 - nx0 < 0.3 * z.box.w and (nx0 < z.box.x0 + 0.1 * z.box.w or nx1 > z.box.x1 - 0.1 * z.box.w):
+            inner_notes.append((nx0, min(l.box.y0 for l in g), nx1, max(l.box.y1 for l in g)))
+
     for item in items:
         zone = zones.get(item.zone)
         group = [by_id[i] for i in item.lines if i in by_id]
@@ -322,8 +397,15 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
         first = group[0]
         top = first.box.y0 * px
         size0 = em_of(group)
-        n = max(1, len(group))
-        pitch = ((group[-1].box.y0 - group[0].box.y0) / (n - 1) * px) if n > 1 else 1.2 * size0
+        # the printed lines (Vision may read one in two pieces) and their pitch: the usual step
+        # from one to the next, whatever order the lines were listed in
+        rows: list[int] = []
+        for y in sorted(l.box.y0 for l in group):
+            if not rows or y - rows[-1] > 0.5 * layout.line_height:
+                rows.append(y)
+        n = len(rows)
+        steps = sorted(b - a for a, b in zip(rows, rows[1:]))
+        pitch = steps[len(steps) // 2] * px if steps else 1.2 * size0
         if item.kind == "heading" and len(group) == 1:
             # one line as printed: its own box, the size that spans it
             x0, w = first.box.x0 * px, first.box.w * px
@@ -335,7 +417,18 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
             gx0, gx1 = min(l.box.x0 for l in group), max(l.box.x1 for l in group)
             x0, w = gx0 * px, (gx1 - gx0) * px * 1.05
         else:
-            x0, w = zone.box.x0 * px, zone.box.w * px
+            left, right = zone.box.x0, zone.box.x1
+            gy0, gy1 = min(l.box.y0 for l in group), max(l.box.y1 for l in group)
+            for nx0, ny0, nx1, ny1 in inner_notes:
+                if min(ny1, gy1) - max(ny0, gy0) < 0.5 * layout.line_height or nx1 < left or nx0 > right:
+                    continue  # not beside this paragraph
+                if (nx0 + nx1) / 2 < left + 0.3 * (right - left):
+                    left = nx1 + 0.5 * layout.line_height
+                elif (nx0 + nx1) / 2 > right - 0.3 * (right - left):
+                    right = nx0 - 0.5 * layout.line_height
+            if right - left < 0.5 * zone.box.w:  # not a margin: the notes took most of the zone
+                left, right = zone.box.x0, zone.box.x1
+            x0, w = left * px, (right - left) * px
         text = item.text
         if item.drop_cap and text.startswith(item.drop_cap):
             lh = layout.line_height
@@ -358,7 +451,7 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
                     blocks.append(Block(Item(item.zone, rest_text, item.lines[k:]), x0, rest[0].box.y0 * px, w,
                                         fit_size(rest_text, 0.97 * w, len(rest), size0, font), pitch))
                 continue
-        indent = max(0.0, (first.box.x0 - zone.box.x0) * px) if item.kind == "paragraph" else 0.0
+        indent = max(0.0, first.box.x0 * px - x0) if item.kind == "paragraph" else 0.0
         indent = indent if indent > 0.5 * size0 else 0.0
         align = item.align if item.kind == "paragraph" else "left"
         if item.kind == "heading":
@@ -373,7 +466,8 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
     regions = [b for b in blocks if b.item is not None]
     for b in regions:
         below = [o.y for o in blocks if o is not b and o.y > b.y + 0.5 * b.line_h
-                 and o.x < b.x + b.w and b.x < o.x + o.w]
+                 and o.x < b.x + b.w and b.x < o.x + o.w
+                 and not (o.item is not None and o.item.kind == "dropcap")]  # a capital stands beside
         b.limit = min([height_pt, *below])
 
     # size every paragraph to the room it has: as many lines (at the original pitch) as fit down
@@ -400,6 +494,8 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
         for b in notes:
             b.size = min(b.size, common)
             b.line_h = 1.15 * b.size
+    for b in blocks:
+        b.start_size = b.size
     return blocks
 
 
@@ -419,7 +515,7 @@ def blocks_html(blocks: list[Block], width_pt: float, height_pt: float, lang: st
 <style>
   * {{ margin: 0; padding: 0; box-sizing: border-box; }}
   .page {{ position: relative; width: {width_pt:.2f}pt; height: {height_pt:.2f}pt; overflow: hidden; }}
-  .region {{ position: absolute; color: #000; font-family: {FONT_FAMILY}; }}
+  .region {{ position: absolute; color: #000; font-family: {FONT_FAMILY}; hyphens: auto; -azul-hyphenation-language: {htmlmod.escape(lang)}; }}
   .region p {{ margin: 0; }}
   .pic {{ position: absolute; }}
 </style>
@@ -460,6 +556,8 @@ def _block(item: Item, x: float, y: float, w: float, size: float, line_h: float,
 
 
 HTML2PDF = Path(__file__).resolve().parents[2] / "html2pdf" / "target" / "release" / "html2pdf"
+WORD_LIST = "/usr/share/dict/words"
+MIN_FIT = 0.7  # the fit loop sets a block at most this much smaller than it started
 
 
 def _write_zip(target: Path, metadata: dict, pages_meta: list[dict], out: Path) -> None:
@@ -467,11 +565,13 @@ def _write_zip(target: Path, metadata: dict, pages_meta: list[dict], out: Path) 
         z.writestr("metadata.json", json.dumps(metadata, indent=2))
         for p in pages_meta:
             z.write(out / p["html"], p["html"])
+        names = {p["html"].removesuffix(".html") for p in pages_meta}
         for picture in sorted((out / "pictures").glob("*.png")) if (out / "pictures").exists() else []:
-            z.write(picture, f"pictures/{picture.name}")
+            if picture.name.rsplit("_", 1)[0] in names:  # page_NNN_k.png: only the zip's pages
+                z.write(picture, f"pictures/{picture.name}")
 
 
-def fit_round(target: Path, page_blocks: dict[int, list[Block]], pages_meta: list[dict], work: Path) -> int:
+def fit_round(target: Path, page_blocks: dict[int, list[Block]], pages_meta: list[dict], work: Path) -> dict[int, int]:
     """Render with html2pdf, and set smaller every block whose text runs past its limit.
 
     The layout engine wraps a little differently than the Helvetica estimate; its rendered glyph
@@ -481,7 +581,7 @@ def fit_round(target: Path, page_blocks: dict[int, list[Block]], pages_meta: lis
     subprocess.run([str(HTML2PDF), str(target), "-o", str(work / "fit.pdf"), "--layout-report", str(report_path)],
                    check=True, capture_output=True)
     reports = {r["page"]: r for r in json.loads(report_path.read_text())}
-    shrunk = 0
+    shrunk: dict[int, int] = {}  # page number: blocks set smaller
     for p in pages_meta:
         report = reports.get(p["html"])
         if report is None:
@@ -492,69 +592,101 @@ def fit_round(target: Path, page_blocks: dict[int, list[Block]], pages_meta: lis
             if not rendered:
                 continue
             ratio = 1.0
-            if rendered["y1"] > block.limit + 0.25 * block.size:
+            # a descender may reach into the line box of the next block, never past the page
+            slack = 0.0 if block.limit >= report["height_pt"] - 1 else 0.25 * block.size
+            if rendered["y1"] > block.limit + slack:
                 # fewer, smaller lines (a smaller heading line): the ratio of the room to what it took
                 took = max(rendered["y1"] - block.y, 1.0)
                 room = max(block.limit - block.y, 0.5 * block.line_h)
                 ratio = room / took
-            if not block.indent and rendered["x1"] > block.x + block.w + 0.25 * block.size:
-                # a line wider than its box: a heading, or a word longer than a note's line. Not
-                # for an indented paragraph: azul fills its first line to the full width (and
-                # shifts it), so that line runs past by the indent whatever the size.
+            if rendered["x1"] > block.x + block.w + 0.25 * block.size:
+                # a line wider than its box: a heading, or a word longer than a note's line
                 ratio = min(ratio, block.w / max(rendered["x1"] - block.x, 1.0))
+            if any(regions[j].y > block.y for j in measured.get("overlaps", []) if j < len(regions)):
+                # its text reaches into the text of a block below (a heading's descenders): a step smaller
+                ratio = min(ratio, 0.97)
             if ratio >= 1.0:
                 continue
             factor = max(0.85, min(0.97, ratio))  # a bit less than the ratio, at most 15% a round
+            if block.size * factor < MIN_FIT * block.start_size:
+                continue  # it does not fit at any readable size (its room is wrong): leave it
             block.size *= factor
             if block.nowrap:
                 block.line_h *= factor  # one line: its line box is the text's
-            shrunk += 1
+            shrunk[p["page_num"]] = shrunk.get(p["page_num"], 0) + 1
     return shrunk
+
+
+# one per worker process: the open PDF and the Vision engine
+_WORKER: dict = {}
+
+
+def prepare_page(pdf_path: Path, n: int, out: Path, lang: tuple[str, ...]) -> dict:
+    """Steps 1-4 for one page (in a worker process): renders, layout, Vision's lines (and the ones
+    it skipped, read again from strips), the pictures. Writes work/page_NNN/."""
+    import pypdfium2 as pdfium
+
+    if _WORKER.get("path") != pdf_path:
+        from .engines import ENGINES
+        from .engines.base import Route
+
+        if "engine" not in _WORKER:
+            _WORKER["engine"] = ENGINES["macos_vision"](Route(lang=lang))
+            _WORKER["engine"].prepare()
+        _WORKER.update(path=pdf_path, pdf=pdfium.PdfDocument(str(pdf_path)))
+    engine = _WORKER["engine"]
+    t = time.perf_counter()
+    name = f"page_{n + 1:03d}"
+    pw = out / "work" / name
+    pw.mkdir(parents=True, exist_ok=True)
+    page = _WORKER["pdf"][n]
+    width_pt, height_pt = page.get_size()
+    dpi = native_dpi(page)
+    native = render(page, dpi, pw / "native.png")
+    render(page, 0.75 * dpi, pw / "vision.png")
+    page.close()
+    layout = analyse(pw / "native.png")
+    draw(pw / "native.png", layout, pw / "layout.png", scale=0.25)
+    read = vision_lines(pw / "vision.png", lang, native, engine)
+    recovered = recover_missed(read, layout, pw / "vision.png", engine, pw)
+    lines = assign(read + recovered, layout)
+    for old in (out / "pictures").glob(f"{name}_*.png"):  # from an earlier run's layout
+        old.unlink()
+    pictures = clip_pictures(pw / "native.png", layout, out, name)
+    (pw / "layout.json").write_text(json.dumps(layout.to_dict(), indent=1))
+    (pw / "lines.json").write_text(json.dumps([{**asdict(l), "box": asdict(l.box), "words": None} for l in lines], indent=1, ensure_ascii=False))
+    return {"name": name, "layout": layout, "lines": lines, "pictures": pictures, "size": (width_pt, height_pt),
+            "dpi": dpi, "recovered": len(recovered), "seconds": time.perf_counter() - t}
 
 
 def reconstruct(pdf_path: Path, out: Path, pages: list[int], lang: tuple[str, ...], html_lang: str,
                 semantic_context: str = "", llm: bool = True, model: str = "sonnet", agents: int = 4,
-                fit_rounds: int = 6, zoom: bool = False) -> Path:
-    import pypdfium2 as pdfium
+                fit_rounds: int = 10, zoom: bool = False, guide: str = "", thinking: bool = True,
+                workers: int = 4) -> Path:
+    from concurrent.futures import ProcessPoolExecutor, as_completed
 
     work = out / "work"
     work.mkdir(parents=True, exist_ok=True)
-    pdf = pdfium.PdfDocument(str(pdf_path))
-    engine = None
     results: dict[int, dict] = {}
     start = time.perf_counter()
-    for n in pages:
-        name = f"page_{n + 1:03d}"
-        pw = work / name
-        pw.mkdir(exist_ok=True)
-        page = pdf[n]
-        width_pt, height_pt = page.get_size()
-        dpi = native_dpi(page)
-        t = time.perf_counter()
-        native = render(page, dpi, pw / "native.png")
-        render(page, 0.75 * dpi, pw / "vision.png")
-        layout = analyse(pw / "native.png")
-        draw(pw / "native.png", layout, pw / "layout.png", scale=0.25)
-        if engine is None:
-            from .engines import ENGINES
-            from .engines.base import Route
-
-            engine = ENGINES["macos_vision"](Route(lang=lang))
-            engine.prepare()
-        lines = assign(vision_lines(pw / "vision.png", lang, native, engine), layout)
-        pictures = clip_pictures(pw / "native.png", layout, out, name)
-        (pw / "layout.json").write_text(json.dumps(layout.to_dict(), indent=1))
-        (pw / "lines.json").write_text(json.dumps([{**asdict(l), "box": asdict(l.box), "words": None} for l in lines], indent=1, ensure_ascii=False))
-        results[n] = {"name": name, "layout": layout, "lines": lines, "pictures": pictures,
-                      "size": (width_pt, height_pt), "dpi": dpi}
-        log.info(f"{name}: {dpi:.0f} dpi, {len(layout.zones)} zones, {len(lines)} lines, {len(pictures)} pictures, {time.perf_counter() - t:.1f}s")
-    pdf.close()
-
-    structures: dict[int, list[Item]] = {}
+    structurer = None
     if llm:
-        from .llm_structure import structure_pages
+        from .llm_structure import Structurer
 
-        structures = structure_pages(results, work, semantic_context, model, agents, zoom)
+        # each page goes to the model as soon as it is read, while the workers read the next ones
+        structurer = Structurer(work, semantic_context, model, agents, zoom, guide, thinking)
+    with ProcessPoolExecutor(max_workers=max(1, workers)) as pool:
+        jobs = {pool.submit(prepare_page, pdf_path.resolve(), n, out, lang): n for n in pages}
+        for done, job in enumerate(as_completed(jobs), 1):
+            n = jobs[job]
+            r = results[n] = job.result()
+            again = f" ({r['recovered']} read again from a strip)" if r["recovered"] else ""
+            log.info(f"[{done}/{len(pages)}] {r['name']}: {r['dpi']:.0f} dpi, {len(r['layout'].zones)} zones, "
+                     f"{len(r['lines'])} lines{again}, {len(r['pictures'])} pictures, {r['seconds']:.1f}s")
+            if structurer is not None:
+                structurer.submit(n, r)
+
+    structures: dict[int, list[Item]] = structurer.collect() if structurer is not None else {}
     for n, r in results.items():
         if n not in structures:
             structures[n] = heuristic_structure(r["lines"], r["layout"])
@@ -567,16 +699,29 @@ def reconstruct(pdf_path: Path, out: Path, pages: list[int], lang: tuple[str, ..
                            "width_px": r["layout"].width, "height_px": r["layout"].height})
     metadata = {"engine": "reconstruct" + ("+" + model if llm else ""), "page_count": len(pages_meta), "pages": pages_meta}
     target = out / "pages.zip"
+    todo = list(pages_meta)  # the pages to (re)write: all, then those whose blocks were set smaller
     for round_ in range(fit_rounds + 1):
-        for p in pages_meta:
+        for p in todo:
             width_pt, height_pt = p["width_pt"], p["height_pt"]
             (out / p["html"]).write_text(blocks_html(page_blocks[p["page_num"]], width_pt, height_pt, html_lang), encoding="utf-8")
-        _write_zip(target, metadata, pages_meta, out)
-        if round_ == fit_rounds or not HTML2PDF.exists():
+        if round_ == fit_rounds or not HTML2PDF.exists() or not todo:
             break
-        shrunk = fit_round(target, page_blocks, pages_meta, work)
-        log.info(f"Fit round {round_ + 1}: {shrunk} blocks ran past the next block and were set smaller")
-        if not shrunk:
-            break
+        fit_zip = work / "fit.zip"
+        _write_zip(fit_zip, {**metadata, "page_count": len(todo), "pages": todo}, todo, out)
+        changed = fit_round(fit_zip, page_blocks, todo, work)
+        log.info(f"Fit round {round_ + 1}: {sum(changed.values())} blocks on {len(changed)} of {len(todo)} pages "
+                 "ran past the next block and were set smaller")
+        todo = [p for p in pages_meta if p["page_num"] in changed]
+    _write_zip(target, metadata, pages_meta, out)
     log.info(f"Wrote {target} ({len(pages_meta)} pages) in {time.perf_counter() - start:.0f}s")
+    if HTML2PDF.exists():
+        pdf_out, report = out / f"{out.resolve().name}.pdf", out / "layout-report.json"
+        cmd = [str(HTML2PDF), str(target), "-o", str(pdf_out), "--layout-report", str(report)]
+        if html_lang.split("-")[0] == "en" and Path(WORD_LIST).exists():
+            # f the model still read for a long s ("addrefs"), from the word list
+            cmd += ["--long-s", "repair", "--dict", WORD_LIST]
+        done = subprocess.run(cmd, capture_output=True, text=True)
+        for line in done.stdout.splitlines() + done.stderr.splitlines():
+            if "Layout report" in line or "Long s" in line or "Wrote" in line or "error" in line.lower():
+                log.info(line.removeprefix("[html2pdf] "))
     return target

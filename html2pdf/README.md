@@ -48,7 +48,11 @@ in about 6% of all words of an 18th-century English text.
   Regular inflections count (-s, -es, -ed, -d, -ing, -ly, 's, 'd). A few f-forms that are words
   but rare in old prose are always changed: fo, fame, fent, fet, fide(s), fin(s), fon(s), fun,
   fum, fee(s), fays, faying. Pairs where both are common (faith/saith, fold/sold, fight/sight) are left alone,
-  and so are capitals (a capital S is never long).
+  and so are capitals (a capital S is never long). British -our spellings count as words though an
+  American list has them as -or ("favour" stays, not "savour").
+
+It works on the OCR word spans and on the text blocks (`<div class="region">`) that
+`pdf-ocr-bench reconstruct` writes.
 
 The run prints how many words were changed, with examples.
 
