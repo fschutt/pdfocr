@@ -383,6 +383,7 @@ class Block:
     limit: float = 0.0  # the lowest its text may reach (the next block below it in its zone)
     fit: tuple | None = None  # (lines in the scan, size to start from, line pitch) for sizing
     start_size: float = 0.0  # the size before the fit loop
+    level: float = 0.0  # the page's type size it was set at (its group in the fit loop); 0: its own
     letter_spacing: float = 0.0  # em
     pitch: float = 0.0  # the scan's line pitch, pt: the line height whenever the text is smaller
 
@@ -543,6 +544,23 @@ def place_lineless(items: list[Item], lines: list[Line], layout: PageLayout) -> 
     return made, floating
 
 
+def own_words(text: str, group: list[Line]) -> list:
+    """The OCR words of `group` that are words of `text` (its own, on lines it shares)."""
+    want: dict[str, int] = {}
+    for w in plain(text).split():
+        k = _norm_word(w)
+        if k:
+            want[k] = want.get(k, 0) + 1
+    found = []
+    for line in group:
+        for t, box in line.words:
+            k = _norm_word(t)
+            if want.get(k, 0) > 0:
+                want[k] -= 1
+                found.append((t, box))
+    return found
+
+
 def own_extent(text: str, group: list[Line]) -> Box | None:
     """Where the words of `text` stand on its OCR lines, when those lines also carry other text
     (Vision reads a margin note and the line of text beside it as one line); None if too few of
@@ -576,16 +594,126 @@ def _majority_zone(group: list[Line], default: str) -> str:
     return max(counts, key=counts.get) if counts else default
 
 
+HEBREW_LETTER = 0.56  # height of a Hebrew letter in azul's Times, em (x-height 0.448, capitals 0.662)
+
+
+def _ratio_of(text: str) -> float:
+    """Glyph height / em for the main script of `text`."""
+    letters = [c for c in plain(text) if c.isalpha()]
+    if not letters:
+        return TIMES_CAP  # figures: as tall as capitals
+    if sum("\u0590" <= c <= "\u05ff" for c in letters) > 0.5 * len(letters):
+        return HEBREW_LETTER
+    if sum(c.isupper() for c in letters) > 0.6 * len(letters):
+        return TIMES_CAP
+    return TIMES_X
+
+
+def measured_em(item: Item, group: list[Line], ink, px: float) -> float | None:
+    """The size (pt) the scan sets `item` in: the median height of the glyphs of its own words
+    (a note Vision ran into the line beside it is measured apart from that line), by the height
+    of such glyphs in Times. None if there is nothing to measure."""
+    import numpy as np
+
+    heights: list[int] = []
+    if ink is not None:
+        import cv2
+
+        words = own_words(item.text, group) if item.kind == "note" else [w for l in group for w in l.words]
+        for _, b in words:
+            crop = ink[max(0, b.y0):b.y1, max(0, b.x0):b.x1]
+            if crop.size == 0:
+                continue
+            _, _, stats, _ = cv2.connectedComponentsWithStats(crop, connectivity=8)
+            heights += [int(h) for x, y, w, h, a in stats[1:] if a >= 8 and h >= 0.3 * b.h]
+    if len(heights) < 4:
+        heights = [l.glyph for l in group if l.glyph]  # the lines' own measure
+    if not heights:
+        return None
+    return float(np.median(heights)) * px / _ratio_of(item.text)
+
+
+def split_sizes(measures: list[tuple[float, int, object]], min_ratio: float = 1.12) -> list[list]:
+    """Measures (size, weight, key) of one area as groups of one type size: split at the gap that
+    leaves the tightest groups, when their sizes differ by `min_ratio` or more; again inside each."""
+    import math
+
+    ms = sorted(measures, key=lambda m: m[0])
+    best = None
+    for i in range(1, len(ms)):
+        lo, hi = ms[:i], ms[i:]
+        mlo, mhi = _weighted_median([(m[0], m[1]) for m in lo]), _weighted_median([(m[0], m[1]) for m in hi])
+        if mhi / mlo < min_ratio:
+            continue
+        spread = sum(m[1] * abs(math.log(m[0] / mlo)) for m in lo) + sum(m[1] * abs(math.log(m[0] / mhi)) for m in hi)
+        if best is None or spread < best[0]:
+            best = (spread, i)
+    if best is None:
+        return [ms]
+    return split_sizes(ms[:best[1]], min_ratio) + split_sizes(ms[best[1]:], min_ratio)
+
+
+def size_levels(estimates: list[tuple[float, int]], tol: float = 0.1) -> list[float]:
+    """The type sizes of a page: size estimates (with their weights, lines) that lie within `tol`
+    of the next make one size, the weighted median of its estimates."""
+    levels, group = [], []
+    for size, weight in sorted(estimates):
+        if group and size > group[-1][0] * (1 + tol):
+            levels.append(_weighted_median(group))
+            group = []
+        group.append((size, weight))
+    if group:
+        levels.append(_weighted_median(group))
+    return levels
+
+
+def _weighted_median(pairs: list[tuple[float, int]]) -> float:
+    total, acc = sum(w for _, w in pairs), 0
+    for size, weight in pairs:
+        acc += weight
+        if acc >= total / 2:
+            return size
+    return pairs[-1][0]
+
+
 def _follow_size(b: Block) -> None:
-    """A wrapped block's line height after its size changed: the scan's pitch, or the size when
-    that is larger (the line height of a size taken from before would keep the lines as tall
-    as they were, and a block set smaller would still run into the next one)."""
+    """A wrapped block's line height: the scan's line pitch, when it was printed on two lines or
+    more (the dictionary is set solid: the pitch is no more than the type size, and a line
+    height of the size makes every paragraph longer than in print); else after its size."""
     if not b.nowrap and b.item is not None and b.item.kind != "dropcap":
-        b.line_h = max(b.pitch, b.size) if b.pitch else 1.15 * b.size
+        b.line_h = b.pitch if b.pitch else 1.15 * b.size
+
+
+def _ink(native: Path):
+    """The scan as 1 where inked (None if it cannot be read)."""
+    import cv2
+
+    gray = cv2.imread(str(native), cv2.IMREAD_GRAYSCALE)
+    if gray is None:
+        return None
+    _, ink = cv2.threshold(gray, 0, 1, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
+    return ink
+
+
+def page_fonts(blocks: list[Block], layout: PageLayout, width_pt: float) -> dict:
+    """What type sizes a page uses where (work/page_NNN/fonts.json): every size measured in the
+    scan, set at (after the fit loop), and the zones and kinds of block in it; and the columns."""
+    px = width_pt / layout.width
+    sizes: dict[float, dict] = {}
+    for b in blocks:
+        if b.item is None or not b.level:
+            continue
+        entry = sizes.setdefault(round(b.level, 2), {"measured_pt": round(b.level, 2), "set_pt": round(b.size, 2), "areas": {}})
+        key = f"{b.item.zone} {b.item.kind}"
+        entry["areas"][key] = entry["areas"].get(key, 0) + 1
+    columns = [{"zone": z.id, "x0_pt": round(z.box.x0 * px, 1), "x1_pt": round(z.box.x1 * px, 1)}
+               for z in layout.zones if z.role == "column"]
+    return {"sizes": sorted(sizes.values(), key=lambda e: -e["measured_pt"]), "columns": columns}
 
 
 def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictures: dict[str, str],
-                 width_pt: float, height_pt: float) -> list[Block]:
+                 width_pt: float, height_pt: float, ink=None) -> list[Block]:
+    """The page's blocks. `ink` (the scan, 1 where inked) measures the type sizes."""
     font = _times()
     px = width_pt / layout.width  # pt per native px
     items = [replace(it) for it in items]  # their lines may be set below
@@ -778,7 +906,7 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
         align = item.align if item.kind == "paragraph" else "left"
         if item.kind == "heading":
             align = item.align if item.align != "justify" else "left"
-        block = Block(item, x0, top, w, size0, max(pitch, 1.0 * size0), align, indent=indent, pitch=pitch)
+        block = Block(item, x0, top, w, size0, max(pitch, 1.0 * size0), align, indent=indent, pitch=pitch if n >= 2 else 0.0)
         block.fit = (n, size0, pitch)  # sized below, once the room down to the next block is known
         blocks.append(block)
 
@@ -802,19 +930,47 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
         b.size = fit_size(plain(b.item.text), 0.97 * b.w, max(n, room_lines), size0, _times(b.item.italic), b.indent)
         b.line_h = max(pitch, b.size)
 
-    # one size per zone: the median of its paragraphs' fitted sizes, a paragraph that needs a
-    # smaller one keeps it; notes all at the median note size (capped by their own fit)
-    for zone_id in {b.item.zone for b in blocks if b.item is not None}:
-        mine = [b for b in blocks if b.item is not None and b.item.zone == zone_id and not b.nowrap]
-        if len(mine) > 1:
-            common = sorted(b.size for b in mine)[len(mine) // 2]
-            for b in mine:
-                b.size = min(b.size, common)
-    notes = [b for b in blocks if b.item is not None and b.item.kind == "note"]
-    if notes:
-        common = sorted(b.size for b in notes)[len(notes) // 2]
-        for b in notes:
-            b.size = min(b.size, common)
+    # the page's type sizes, by area (a zone's text, its margin notes, its footnotes; Hebrew apart):
+    # each block measured in the scan, an area at the median of its blocks, areas whose sizes are
+    # within 6% one size; every block at its area's size (headings, capitals: their own)
+    text_blocks = [b for b in blocks if b.item is not None and not b.nowrap and b.item.kind in ("paragraph", "note")]
+    area_of = {id(b): (b.item.zone, b.item.kind, _ratio_of(b.item.text) == HEBREW_LETTER) for b in text_blocks}
+    own: dict[int, tuple[float, int]] = {}
+    for b in text_blocks:
+        em = measured_em(b.item, [by_id[i] for i in b.item.lines if i in by_id], ink, px)
+        if em:
+            own[id(b)] = (em, max(1, len(b.item.lines)))
+    # an area may hold two sizes (footnotes the model called paragraphs, in a zone with the
+    # text; a verse quoted in smaller type): its blocks' measures split into groups (`split_sizes`)
+    size_of: dict[int, float] = {}
+    area_size: dict[tuple, float] = {}  # the area's main size (most lines), for blocks not measured
+    weights: list[tuple[float, int]] = []
+    for area in {area_of[id(b)] for b in text_blocks}:
+        mine = [(own[id(b)][0], own[id(b)][1], id(b)) for b in text_blocks if area_of[id(b)] == area and id(b) in own]
+        groups = split_sizes(mine) if mine else []
+        for g in groups:
+            size = _weighted_median([(em, w) for em, w, _ in g])
+            weights.append((size, sum(w for _, w, _ in g)))
+            for _, _, key in g:
+                size_of[key] = size
+        if groups:
+            main = max(groups, key=lambda g: sum(w for _, w, _ in g))
+            area_size[area] = _weighted_median([(em, w) for em, w, _ in main])
+    levels = size_levels(weights, tol=0.06)
+    for b in text_blocks:
+        area = area_of[id(b)]
+        if id(b) in size_of:
+            size = size_of[id(b)]
+        elif area in area_size:
+            size = area_size[area]
+        else:  # nothing measured in its area: the size of its kind (and script) elsewhere on the page
+            kin = [sz for (z, kind, heb), sz in area_size.items() if kind == area[1] and heb == area[2]]
+            if not kin:
+                continue
+            size = sorted(kin)[len(kin) // 2]
+        b.size = b.level = min(levels, key=lambda level: abs(level - size))
+        if b.item.kind == "note":
+            b.pitch = 0.0  # a note's line height follows its size
     for b in blocks:
         _follow_size(b)
         b.start_size = b.size
@@ -1024,6 +1180,7 @@ def fit_round(target: Path, page_blocks: dict[int, list[Block]], pages_meta: lis
             continue
         regions = [b for b in page_blocks[p["page_num"]] if b.item is not None]
         drawn = [m.get("rendered") for m in report["regions"]]
+        groups: dict[float, list[tuple[Block, float]]] = {}
         for k, (block, measured) in enumerate(zip(regions, report["regions"])):
             rendered = measured.get("rendered")
             if not rendered:
@@ -1038,10 +1195,13 @@ def fit_round(target: Path, page_blocks: dict[int, list[Block]], pages_meta: lis
                 if above and block.y + 0.5 < max(above) + 0.2 * block.size <= lowest:
                     block.y = max(above) + 0.2 * block.size
                     shrunk[p["page_num"]] = shrunk.get(p["page_num"], 0) + 1
+                    if block.level:
+                        groups.setdefault(block.level, []).append((block, 1.0))
                     continue
             ratio = 1.0
-            # a descender may reach into the line box of the next block, never past the page
-            slack = 0.0 if block.limit >= report["height_pt"] - 1 else 0.25 * block.size
+            # text may reach half a line into the next block (its first line's OCR box is a few
+            # px higher or lower than where its line box begins), never past the page
+            slack = 0.0 if block.limit >= report["height_pt"] - 1 else 0.5 * block.line_h
             if rendered["y1"] > block.limit + slack:
                 # fewer, smaller lines (a smaller heading line): the ratio of the room to what it took
                 took = max(rendered["y1"] - block.y, 1.0)
@@ -1053,6 +1213,9 @@ def fit_round(target: Path, page_blocks: dict[int, list[Block]], pages_meta: lis
             if any(regions[j].y > block.y for j in measured.get("overlaps", []) if j < len(regions)):
                 # its text reaches into the text of a block below (a heading's descenders): a step smaller
                 ratio = min(ratio, 0.97)
+            if block.level:
+                groups.setdefault(block.level, []).append((block, ratio))
+                continue
             if ratio >= 1.0:
                 continue
             factor = max(0.85, min(0.97, ratio))  # a bit less than the ratio, at most 15% a round
@@ -1063,6 +1226,20 @@ def fit_round(target: Path, page_blocks: dict[int, list[Block]], pages_meta: lis
                 block.line_h *= factor  # one line: its line box is the text's
             _follow_size(block)
             shrunk[p["page_num"]] = shrunk.get(p["page_num"], 0) + 1
+        # a type size of the page is set smaller as a whole, when a fifth of its blocks run over
+        # (one block that does not fit at all keeps its size: its room is wrong, not the size)
+        for level, members in groups.items():
+            ratios = sorted(r for _, r in members)
+            r20 = ratios[int(0.2 * (len(ratios) - 1))]
+            if r20 >= 1.0:
+                continue
+            factor = max(0.85, min(0.97, r20))
+            if members[0][0].size * factor < MIN_FIT * members[0][0].start_size:
+                continue
+            for b, _ in members:
+                b.size *= factor
+                _follow_size(b)
+            shrunk[p["page_num"]] = shrunk.get(p["page_num"], 0) + len(members)
     return shrunk
 
 
@@ -1205,7 +1382,8 @@ def reconstruct(pdf_path: Path, out: Path, pages: list[int], lang: tuple[str, ..
     pages_meta, page_blocks = [], {}
     for n, r in sorted(results.items()):
         width_pt, height_pt = r["size"]
-        page_blocks[n] = build_blocks(structures[n], r["lines"], r["layout"], r["pictures"], width_pt, height_pt)
+        page_blocks[n] = build_blocks(structures[n], r["lines"], r["layout"], r["pictures"], width_pt, height_pt,
+                                      ink=_ink(work / r["name"] / "native.png"))
         pages_meta.append({"page_num": n, "html": f"{r['name']}.html", "width_pt": width_pt, "height_pt": height_pt,
                            "width_px": r["layout"].width, "height_px": r["layout"].height})
     metadata = {"engine": "reconstruct" + ("+" + model if llm else ""), "page_count": len(pages_meta), "pages": pages_meta}
@@ -1215,7 +1393,7 @@ def reconstruct(pdf_path: Path, out: Path, pages: list[int], lang: tuple[str, ..
 
     import inspect
 
-    fit_code = inspect.getsource(fit_round) + inspect.getsource(_follow_size)  # sizes found by other code are no use
+    fit_code = inspect.getsource(globals()["fit_round"]) + inspect.getsource(_follow_size)  # sizes found by other code are no use
     start_html = {}
     todo = []  # the pages to (re)write and fit: those not fitted before, then those set smaller
     for p in pages_meta:
@@ -1244,6 +1422,8 @@ def reconstruct(pdf_path: Path, out: Path, pages: list[int], lang: tuple[str, ..
                  "ran past the next block and were set smaller")
         todo = [p for p in pages_meta if p["page_num"] in changed]
     for p in pages_meta:
+        (work / p["html"].removesuffix(".html") / "fonts.json").write_text(json.dumps(
+            page_fonts(page_blocks[p["page_num"]], results[p["page_num"]]["layout"], p["width_pt"]), indent=1))
         (work / p["html"].removesuffix(".html") / "fit.json").write_text(json.dumps(
             {"key": start_html[p["page_num"]], "sizes": [[b.size, b.line_h] for b in page_blocks[p["page_num"]]]}))
     _write_zip(target, metadata, pages_meta, out)
