@@ -415,6 +415,134 @@ def column_parts(item: Item, group: list[Line], lh: float) -> list[tuple[Item, l
     return out or [(item, group)]
 
 
+def _norm_word(w: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", w.lower().replace("ſ", "s").replace("f", "s"))
+
+
+def locate(text: str, lines: list[Line], lh: float) -> tuple[Box, list] | None:
+    """Where the words of `text` stand on the page, for an item that has no OCR lines of its own:
+    the line with most of its words, and the lines just below it (a note of several lines),
+    only the words near those on that line."""
+    want: dict[str, int] = {}
+    for w in plain(text).split():
+        k = _norm_word(w)
+        if k:
+            want[k] = want.get(k, 0) + 1
+    if not want:
+        return None
+    def matched(line: Line) -> list:
+        left, out = dict(want), []
+        for t, b in line.words:
+            k = _norm_word(t)
+            if left.get(k, 0) > 0:
+                left[k] -= 1
+                out.append((t, b))
+        return out
+    scored = [(len(matched(l)), l) for l in lines]
+    best_n, best = max(scored, key=lambda s: (s[0], -s[1].box.y0), default=(0, None))
+    n_words = sum(want.values())
+    if best is None or best_n < (1 if n_words == 1 else max(2, 0.4 * n_words)):
+        return None
+    # on that line, the longest run of its words (a gap of one word allowed): "Ch. iv. 14, 15" at
+    # the line's start, not every "14" in the text beside it
+    keys = dict(want)
+    flags = []
+    for t, b in best.words:
+        k = _norm_word(t)
+        hit = keys.get(k, 0) > 0
+        if hit:
+            keys[k] -= 1
+        flags.append((hit, b))
+    runs, cur, gap = [], [], 0
+    for hit, b in flags:
+        if hit:
+            cur.append(b)
+            gap = 0
+        elif cur and gap == 0:
+            gap = 1
+        else:
+            if cur:
+                runs.append(cur)
+            cur, gap = [], 0
+    if cur:
+        runs.append(cur)
+    first = max(runs, key=len, default=[])
+    if len(first) < (1 if n_words == 1 else max(2, -(-n_words // 2))):
+        return None  # a stray "iv" or "14" in the text beside it is no find
+    x0, x1 = min(b.x0 for b in first) - lh, max(b.x1 for b in first) + lh
+    found, left = [], dict(want)
+    for line in sorted(lines, key=lambda l: l.box.y0):
+        if not (best.box.y0 - 0.5 * lh <= line.box.y0 <= best.box.y0 + (n_words / 2 + 1) * 1.5 * lh):
+            continue
+        for t, b in line.words:
+            k = _norm_word(t)
+            if left.get(k, 0) > 0 and b.x1 >= x0 and b.x0 <= x1:
+                left[k] -= 1
+                found.append((t, b))
+    box = found[0][1]
+    for _, b in found[1:]:
+        box = box.union(b)
+    return box, found
+
+
+def place_lineless(items: list[Item], lines: list[Line], layout: PageLayout) -> tuple[list[Line], set[str]]:
+    """Lines for the items that have none: where their words are (`locate`), else just below the
+    item before them. Each such item gets the new line's id; the new lines are returned, and the
+    ids of the notes that were not found (they go to their column's margin, see `build_blocks`)."""
+    known = {l.id for l in lines}
+    text_zones = [z for z in layout.zones if z.role in TEXT_ROLES]
+    lh = layout.line_height
+    made: list[Line] = []
+    floating: set[str] = set()
+    prev: list[Line] = []
+    for k, item in enumerate(items):
+        own = [l for l in lines + made if l.id in item.lines]
+        if own:
+            prev = own
+            continue
+        hit = locate(item.text, lines, lh)
+        strips = [z for z in layout.zones if z.role == "notes"]
+        if hit:
+            box, words = hit
+        elif item.kind == "note" and prev and not strips:
+            # beside the start of the entry it follows; its column's margin is set later
+            y0 = min(l.box.y0 for l in prev)
+            box, words = Box(min(l.box.x0 for l in prev), y0, max(l.box.x1 for l in prev), int(y0 + 1.2 * lh)), []
+            floating.add(f"X{k + 1}")
+        elif item.kind == "note" and strips and prev:
+            # a note read from the scan alone: in the note strip beside the item it follows, under
+            # the notes put there before it
+            py0, py1 = min(l.box.y0 for l in prev), max(l.box.y1 for l in prev)
+            pcx = (min(l.box.x0 for l in prev) + max(l.box.x1 for l in prev)) / 2
+            beside = [z for z in strips if z.box.y0 - 2 * lh <= py0 <= z.box.y1] or strips
+            strip = min(beside, key=lambda z: abs((z.box.x0 + z.box.x1) / 2 - pcx))
+            y0 = max([py0] + [l.box.y1 + int(0.3 * lh) for l in made if l.zone == strip.id])
+            box, words = Box(strip.box.x0, y0, strip.box.x1, int(y0 + 1.2 * lh)), []
+        else:
+            # read by the model alone: under the item before it, as wide as that item's lines
+            x0 = min((l.box.x0 for l in prev), default=text_zones[0].box.x0 if text_zones else 0)
+            x1 = max((l.box.x1 for l in prev), default=text_zones[0].box.x1 if text_zones else layout.width)
+            y0 = max((l.box.y1 for l in prev), default=text_zones[0].box.y0 if text_zones else 0) + int(0.3 * lh)
+            box, words = Box(int(x0), y0, int(x1), int(y0 + 1.2 * lh)), []
+        cx, cy = (box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2
+        zone = next((z for z in text_zones if z.box.contains_point(cx, cy)), None) or \
+            min(text_zones, key=lambda z: _distance(z.box, cx, cy), default=None)
+        line_id = f"X{k + 1}"
+        while line_id in known:
+            line_id += "x"
+        if f"X{k + 1}" in floating and line_id != f"X{k + 1}":
+            floating.discard(f"X{k + 1}")
+            floating.add(line_id)
+        line = Line(line_id, plain(item.text), box, words, zone.id if zone else item.zone)
+        made.append(line)
+        item.lines = [line_id]
+        if zone is not None and item.zone not in {z.id for z in layout.zones}:
+            item.zone = zone.id
+        if item.kind != "note" or line_id not in floating:
+            prev = [line]  # notes beside one entry stay beside its start
+    return made, floating
+
+
 def own_extent(text: str, group: list[Line]) -> Box | None:
     """Where the words of `text` stand on its OCR lines, when those lines also carry other text
     (Vision reads a margin note and the line of text beside it as one line); None if too few of
@@ -460,6 +588,9 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
                  width_pt: float, height_pt: float) -> list[Block]:
     font = _times()
     px = width_pt / layout.width  # pt per native px
+    items = [replace(it) for it in items]  # their lines may be set below
+    made, floating = place_lineless(items, lines, layout)
+    lines = lines + made
     by_id = {l.id: l for l in lines}
     zones = {z.id: z for z in layout.zones}
 
@@ -481,14 +612,40 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
     for it in items:
         g = [by_id[i] for i in it.lines if i in by_id]
         z = zones.get(_majority_zone(g, it.zone)) if g else None
-        if it.kind != "note" or z is None or z.role == "notes" or not g:
+        if it.kind != "note" or z is None or z.role == "notes" or not g or g[0].id in floating:
             continue
         own = own_extent(it.text, g)
         nx0, nx1 = (own.x0, own.x1) if own else (min(l.box.x0 for l in g), max(l.box.x1 for l in g))
         ny0, ny1 = (own.y0, own.y1) if own else (min(l.box.y0 for l in g), max(l.box.y1 for l in g))
         # narrow, at an edge of its column (a footnote under the text is neither)
         if nx1 - nx0 < 0.3 * z.box.w and (nx0 < z.box.x0 + 0.1 * z.box.w or nx1 > z.box.x1 - 0.1 * z.box.w):
-            inner_notes.append((nx0, ny0, nx1, ny1))
+            inner_notes.append((nx0, ny0, nx1, ny1, z.id, "left" if (nx0 + nx1) / 2 < z.box.x0 + 0.5 * z.box.w else "right"))
+    # a column's note margin: where its notes typically start and end (Vision may have read only
+    # a fragment of one note, "3. 4" of "Numb. xix. 3, 4, 5, 6.")
+    margin_of: dict[tuple[str, str], tuple[float, float]] = {}
+    for key in {(nt[4], nt[5]) for nt in inner_notes}:
+        mine = [nt for nt in inner_notes if (nt[4], nt[5]) == key]
+        x0s, x1s = sorted(nt[0] for nt in mine), sorted(nt[2] for nt in mine)
+        margin_of[key] = (x0s[len(x0s) // 2], x1s[len(x1s) // 2])
+    inner_notes = [(m[0], nt[1], m[1], nt[3], nt[4], nt[5]) if (m := margin_of.get((nt[4], nt[5]))) else nt
+                   for nt in inner_notes]
+    # notes not found on the page: in their column's margin (its outer side if it has none yet),
+    # stacked where several stand beside one entry
+    lh = layout.line_height
+    for line in (by_id[i] for i in sorted(floating)):
+        z = zones.get(line.zone)
+        if z is None or z.role not in ("column", "text"):
+            continue
+        sides = [side for (zid, side) in margin_of if zid == z.id]
+        side = sides[0] if sides else ("right" if z.box.x0 + z.box.w / 2 > layout.width / 2 else "left")
+        mx0, mx1 = margin_of.get((z.id, side), (z.box.x1 - 0.12 * z.box.w, z.box.x1) if side == "right"
+                                 else (z.box.x0, z.box.x0 + 0.12 * z.box.w))
+        margin_of.setdefault((z.id, side), (mx0, mx1))
+        y0, gap = line.box.y0, int(0.3 * lh) + 1
+        while taken := [nt[3] for nt in inner_notes if nt[4] == z.id and nt[5] == side and nt[1] <= y0 < nt[3] + gap]:
+            y0 = max(taken) + gap  # below the notes already there (each step moves down)
+        line.box = Box(int(mx0), int(y0), int(mx1), int(y0 + 2.4 * lh))
+        inner_notes.append((mx0, line.box.y0, mx1, line.box.y1, z.id, side))
 
     for whole in items:
       group_all = [by_id[i] for i in whole.lines if i in by_id]
@@ -536,13 +693,17 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
             gx0, gx1 = (own.x0, own.x1) if own else (min(l.box.x0 for l in group), max(l.box.x1 for l in group))
             if own:
                 top = own.y0 * px
-            else:
+            side = "left" if (gx0 + gx1) / 2 < zone.box.x0 + 0.5 * zone.box.w else "right"
+            if (zone.id, side) in margin_of and (own or gx1 - gx0 > 0.3 * zone.box.w):
+                # the column's note margin (its words may be a fragment, or not on its line)
+                gx0, gx1 = margin_of[(zone.id, side)]
+            elif not own:
                 # its words are not on its lines (the model read the note from the scan and gave
                 # it a line of the text beside it): the margin the column's other notes stand in
                 same = [nt for nt in inner_notes if zone.box.x0 - layout.line_height <= (nt[0] + nt[2]) / 2 <= zone.box.x1]
                 if same:
-                    gx0, _, gx1, _ = min(same, key=lambda nt: abs(nt[1] - first.box.y0))
-            x0, w = gx0 * px, (gx1 - gx0) * px * 1.05
+                    gx0, _, gx1, _ = min(same, key=lambda nt: abs(nt[1] - first.box.y0))[:4]
+            x0, w = gx0 * px, (gx1 - gx0) * px
         else:
             left, right = zone.box.x0, zone.box.x1
             # the measure of its own lines: where most start, where the long ones end
@@ -553,7 +714,14 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
                 # three columns inside a wide zone, a zone narrower than the text
                 left, right = ex0, ex0 + 1.02 * (ex1 - ex0)
             gy0, gy1 = min(l.box.y0 for l in group), max(l.box.y1 for l in group)
-            for nx0, ny0, nx1, ny1 in inner_notes:
+            # the column's note margins: kept free for all its text, as in print
+            if (zone.id, "left") in margin_of:
+                left = max(left, margin_of[(zone.id, "left")][1] + 0.5 * layout.line_height)
+            if (zone.id, "right") in margin_of:
+                right = min(right, margin_of[(zone.id, "right")][0] - 0.5 * layout.line_height)
+            # note strips the layout found inside the column's width count as its margin too
+            strips = [(z.box.x0, z.box.y0, z.box.x1, z.box.y1) for z in layout.of("notes")]
+            for nx0, ny0, nx1, ny1, *_ in inner_notes + strips:
                 if min(ny1, gy1) - max(ny0, gy0) < 0.5 * layout.line_height or nx1 < left or nx0 > right:
                     continue  # not beside this paragraph
                 if (nx0 + nx1) / 2 < left + 0.3 * (right - left):
@@ -855,10 +1023,22 @@ def fit_round(target: Path, page_blocks: dict[int, list[Block]], pages_meta: lis
         if report is None:
             continue
         regions = [b for b in page_blocks[p["page_num"]] if b.item is not None]
-        for block, measured in zip(regions, report["regions"]):
+        drawn = [m.get("rendered") for m in report["regions"]]
+        for k, (block, measured) in enumerate(zip(regions, report["regions"])):
             rendered = measured.get("rendered")
             if not rendered:
                 continue
+            if block.item.kind == "note":
+                # a margin note that runs into the note above it moves down below it, as in print
+                above = [drawn[j]["y1"] for j in measured.get("overlaps", [])
+                         if j < len(regions) and regions[j].item.kind == "note" and drawn[j]
+                         and (regions[j].y < block.y or (regions[j].y == block.y and j < k))]
+                # (no further than its text still fits on the page; else it is set smaller below)
+                lowest = report["height_pt"] - (rendered["y1"] - block.y) - 0.2 * block.size
+                if above and block.y + 0.5 < max(above) + 0.2 * block.size <= lowest:
+                    block.y = max(above) + 0.2 * block.size
+                    shrunk[p["page_num"]] = shrunk.get(p["page_num"], 0) + 1
+                    continue
             ratio = 1.0
             # a descender may reach into the line box of the next block, never past the page
             slack = 0.0 if block.limit >= report["height_pt"] - 1 else 0.25 * block.size
@@ -1033,11 +1213,14 @@ def reconstruct(pdf_path: Path, out: Path, pages: list[int], lang: tuple[str, ..
     # a page whose blocks are as in the last run gets the sizes the fit loop found then
     import hashlib
 
+    import inspect
+
+    fit_code = inspect.getsource(fit_round) + inspect.getsource(_follow_size)  # sizes found by other code are no use
     start_html = {}
     todo = []  # the pages to (re)write and fit: those not fitted before, then those set smaller
     for p in pages_meta:
         blocks = page_blocks[p["page_num"]]
-        start_html[p["page_num"]] = hashlib.sha1(blocks_html(blocks, p["width_pt"], p["height_pt"], html_lang).encode()).hexdigest()
+        start_html[p["page_num"]] = hashlib.sha1((fit_code + blocks_html(blocks, p["width_pt"], p["height_pt"], html_lang)).encode()).hexdigest()
         fitted = work / p["html"].removesuffix(".html") / "fit.json"
         saved = json.loads(fitted.read_text()) if fitted.exists() else {}
         sizes = saved.get("sizes", [])

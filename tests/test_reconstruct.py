@@ -204,3 +204,28 @@ def test_other_markup_in_an_answer_is_normalised():
 
     assert normalize_markup("Chester<sup>a</sup>, <em>Job</em> <small>xi.</small> <SUP class=x>q</SUP>") == "Chester<sup>a</sup>, <i>Job</i> xi. <sup>q</sup>"
     assert normalize_markup('<span class="x">Basil</span><br>Rome') == "Basil Rome"
+
+
+def test_a_note_without_lines_of_its_own_is_placed_by_its_words_in_the_column_margin():
+    layout = PageLayout(width=1000, height=1000, line_height=30)
+    layout.zones = [Zone("column", Box(50, 100, 900, 900), 0)]
+    # Vision ran the margin notes into the lines beside them
+    def line(i, y, note, text, x_note=60):
+        words = [(w, Box(x_note + 40 * k, y, x_note + 40 * k + 30, y + 30)) for k, w in enumerate(note.split())]
+        words += [(w, Box(250 + 60 * k, y, 250 + 60 * k + 50, y + 30)) for k, w in enumerate(text.split())]
+        return Line(f"L{i}", " ".join([note, text]).strip(), Box(x_note if note else 250, y, 900, y + 30), words, "column0")
+    lines = [line(1, 100, "Gen. i. 2.", "the paragraph text goes on here"),
+             line(2, 140, "", "and on in the next line of it"),
+             line(3, 300, "Exod. iv.", "another paragraph begins on this line"),
+             line(4, 340, "", "and it ends here on this one")]
+    items = [Item("column0", "the paragraph text goes on here and on in the next line of it", ["L1", "L2"]),
+             Item("column0", "Gen. i. 2.", [], "note"),  # the model read it from the scan, with no line
+             Item("column0", "another paragraph begins on this line and it ends here on this one", ["L3", "L4"]),
+             Item("column0", "Exod. iv.", [], "note")]
+    blocks = [b for b in build_blocks(items, lines, layout, {}, 1000, 1000) if b.item]
+    notes = [b for b in blocks if b.item.kind == "note"]
+    assert [n.item.text for n in notes] == ["Gen. i. 2.", "Exod. iv."]  # kept, not dropped
+    assert notes[0].y == pytest.approx(100) and notes[1].y == pytest.approx(300)
+    assert all(n.x < 200 and n.x + n.w <= 250 for n in notes)  # in the margin, left of the text
+    paras = [b for b in blocks if b.item.kind == "paragraph"]
+    assert all(p.x >= max(n.x + n.w for n in notes) for p in paras)  # the text starts beside them

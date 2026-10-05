@@ -272,7 +272,9 @@ pdf-ocr-bench reconstruct scan.pdf -o out --pages 1-20 --lang enm \
 6. **HTML**: every paragraph at the place of its first line, as wide as its column (beside the
    margin notes in it), justified and hyphenated, in Times at one size per column (the size at
    which it wraps to its original number of lines, at the original line pitch); notes at one
-   size beside the line they annotate; a drop capital as the scan's own letter (plain or
+   size beside the line they annotate (a column's note margin is kept free for all its text; a
+   note or title line the model read from the scan without an OCR line of its own is placed by
+   its words, or in its column's margin beside the entry it follows); a drop capital as the scan's own letter (plain or
    ornamented, cut out as an image over the letter as invisible text, so it is still found and
    copied) with the lines beside it narrowed; a letter-spaced title line (gaps between its
    glyphs over a quarter of their height) at the size of its glyphs, `letter-spacing` filling

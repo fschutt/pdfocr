@@ -106,9 +106,11 @@ def to_items(answer: dict, lines: list, layout: PageLayout):
         ids = [i for i in a.get("lines", []) if i in known and i not in used]
         used.update(ids)
         text = clean_marks(normalize_markup(a.get("text", "").strip()))
-        if a.get("kind") == "noise" or not ids or not plain(text).strip():
+        if a.get("kind") == "noise" or not plain(text).strip():
             continue
-        zone = a.get("zone") if a.get("zone") in zones else known[ids[0]].zone
+        # no lines of its own (a margin note or a title line the model read from the scan, which
+        # Vision ran into the line beside it or did not read): kept, placed by its words
+        zone = a.get("zone") if a.get("zone") in zones else (known[ids[0]].zone if ids else "")
         items.append(Item(zone=zone, text=text, lines=ids, kind=a.get("kind", "paragraph"),
                           drop_cap=(a.get("drop_cap") or "")[:1], align=a.get("align") or "justify",
                           italic=bool(a.get("italic"))))
