@@ -214,7 +214,7 @@ class Structurer:
                 return None, {"error": "not sent: the usage limit was reached"}
             (pw / "prompt.txt").write_text(key, encoding="utf-8")
             content, _ = claude_cli.page_content(self.work / r["name"] / "native.png", pw)
-            content.append({"type": "text", "text": prompt})
+            content.append({"type": "text", "text": prompt + self._feedback(answer, r)})
             answer, result = claude_cli.ask(content, self.system, SCHEMA, pw, self.model, zoom=self.zoom,
                                             thinking=self.thinking)
             if answer is None and LIMIT_HIT.search(str(result.get("result") or result.get("error") or "")):
@@ -228,6 +228,18 @@ class Structurer:
             took = f", {result['duration_ms'] / 1000:.0f}s" if result.get("duration_ms") else ""
             log.info(f"{r['name']}: {len(items)} items from {self.model} ({result.get('num_turns', 0)} turns{took})")
         return items, result
+
+    @staticmethod
+    def _feedback(answer: dict | None, r: dict) -> str:
+        """For a page asked again: what the earlier answer left out (Sonnet sometimes hands in the
+        first column of a page and stops)."""
+        if not answer:
+            return ""
+        known = {l.id for l in r["lines"]}
+        listed = {i for a in answer.get("items", []) for i in a.get("lines", [])} & known
+        zones = sorted({l.zone for l in r["lines"] if l.id not in listed})
+        return (f"\n\nAn earlier answer to this page listed only {len(listed)} of its {len(known)} OCR lines and "
+                f"left out zones {', '.join(zones)}. Answer the whole page: every OCR line in exactly one item.")
 
     def collect(self) -> dict[int, list]:
         """{page index: items} for the pages the model answered."""
