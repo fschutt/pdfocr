@@ -488,6 +488,35 @@ def locate(text: str, lines: list[Line], lh: float) -> tuple[Box, list] | None:
     return box, found
 
 
+def unread_ink(layout: PageLayout, lines: list[Line], prev: list[Line], lh: float) -> tuple[Box, list] | None:
+    """Where text no OCR read stands (Hebrew, which Vision does not read): inked words (OpenCV)
+    no OCR word covers, run together on a row; the first such run after the item before it."""
+    covered = [b for l in lines for _, b in l.words] or [l.box for l in lines]
+    blocked = [z.box for z in layout.zones if z.role in ("picture", "dropcap")]
+    free = [w for w in layout.words if w.w >= 0.8 * lh and not any(
+        c.x0 - 0.2 * lh <= (w.x0 + w.x1) / 2 <= c.x1 + 0.2 * lh and c.y0 - 0.2 * lh <= (w.y0 + w.y1) / 2 <= c.y1 + 0.2 * lh
+        for c in covered + blocked)]
+    runs: list[list[Box]] = []
+    for w in sorted(free, key=lambda w: (w.y0, w.x0)):
+        run = next((r for r in runs if abs(r[-1].y0 - w.y0) < 0.6 * lh and w.x0 - r[-1].x1 < 1.5 * lh), None)
+        if run is None:
+            runs.append([w])
+        else:
+            run.append(w)
+    if not runs:
+        return None
+    py = min((l.box.y0 for l in prev), default=0)
+    px1 = max((l.box.x1 for l in prev if l.box.y0 < py + 0.6 * lh), default=0)
+    after = [r for r in runs if (abs(r[0].y0 - py) < 0.6 * lh and r[0].x0 >= px1 - lh) or r[0].y0 >= py + 0.6 * lh]
+    if not after:
+        return None
+    run = min(after, key=lambda r: (r[0].y0 >= py + 0.6 * lh, r[0].y0, r[0].x0))
+    box = run[0]
+    for w in run[1:]:
+        box = box.union(w)
+    return box, []
+
+
 def place_lineless(items: list[Item], lines: list[Line], layout: PageLayout) -> tuple[list[Line], set[str]]:
     """Lines for the items that have none: where their words are (`locate`), else just below the
     item before them. Each such item gets the new line's id; the new lines are returned, and the
@@ -505,6 +534,8 @@ def place_lineless(items: list[Item], lines: list[Line], layout: PageLayout) -> 
             continue
         hit = locate(item.text, lines, lh)
         strips = [z for z in layout.zones if z.role == "notes"]
+        if not hit and _ratio_of(item.text) == HEBREW_LETTER:
+            hit = unread_ink(layout, lines + made, prev, lh)
         if hit:
             box, words = hit
         elif item.kind == "note" and prev and not strips:
@@ -611,10 +642,10 @@ def _ratio_of(text: str) -> float:
     return TIMES_X
 
 
-def measured_em(item: Item, group: list[Line], ink, px: float) -> float | None:
+def measured_em(item: Item, group: list[Line], ink, px: float) -> tuple[float, int] | None:
     """The size (pt) the scan sets `item` in: the median height of the glyphs of its own words
     (a note Vision ran into the line beside it is measured apart from that line), by the height
-    of such glyphs in Times. None if there is nothing to measure."""
+    of such glyphs in Times, and how many glyphs that is. None if there is nothing to measure."""
     import numpy as np
 
     heights: list[int] = []
@@ -632,7 +663,7 @@ def measured_em(item: Item, group: list[Line], ink, px: float) -> float | None:
         heights = [l.glyph for l in group if l.glyph]  # the lines' own measure
     if not heights:
         return None
-    return float(np.median(heights)) * px / _ratio_of(item.text)
+    return float(np.median(heights)) * px / _ratio_of(item.text), len(heights)
 
 
 def size_levels(estimates: list[tuple[float, int]], tol: float = 0.1) -> list[float]:
@@ -656,6 +687,63 @@ def _weighted_median(pairs: list[tuple[float, int]]) -> float:
         if acc >= total / 2:
             return size
     return pairs[-1][0]
+
+
+def is_footnote(item: Item, zones: dict) -> bool:
+    """A footnote: the model named a footnote zone for it, or it stands in one."""
+    zone = zones.get(item.zone)
+    return item.label.startswith("footnotes") or (zone is not None and zone.role == "footnotes")
+
+
+def set_footnotes(blocks: list[Block], by_id: dict, lh: float, px: float) -> None:
+    """The footnotes as print sets them: one after another in rows, a long one wrapping to the
+    band's left edge. Each is a block as wide as the band, its first line indented to where it
+    starts in the scan; one whose words are on no line follows the one before it on its row."""
+    foot = [b for b in blocks if b.item is not None and b.item.kind in ("paragraph", "note") and b.item.label.startswith("footnotes")]
+    if not foot:
+        return
+    starts = {}
+    for b in foot:
+        group = [by_id[i] for i in b.item.lines if i in by_id]
+        words = own_words(b.item.text, group)
+        if not words and group and sum(len(l.text) for l in group) >= 0.5 * len(plain(b.item.text)):
+            # none of its words read as such (Hebrew read as figures): its own line is where it is
+            # (not a line of a stray mark or two, which the OCR may have read anywhere)
+            words = [w for l in group for w in l.words] or [("", l.box) for l in group]
+        if words:
+            top = min(w.y0 for _, w in words)
+            first = [w for _, w in words if w.y0 < top + 0.6 * lh]
+            starts[id(b)] = (min(w.x0 for w in first), top, max(w.x1 for w in first))
+    if not starts:
+        return
+    x0 = min(v[0] for v in starts.values())
+    x1 = max(max(w.x1 for _, w in own_words(b.item.text, [by_id[i] for i in b.item.lines if i in by_id]) or [(None, Box(0, 0, 0, 0))])
+             for b in foot)
+    x1 = max(x1, max(v[2] for v in starts.values()))
+    # the rows' pitch: the line height of every footnote (a long one runs on in the next row)
+    tops = sorted({round(v[1]) for v in starts.values()})
+    rows: list[float] = []
+    for t in tops:
+        if not rows or t - rows[-1] > 0.5 * lh:
+            rows.append(t)
+    steps = sorted(b2 - a for a, b2 in zip(rows, rows[1:]))
+    pitch = steps[len(steps) // 2] * px if steps else 0.0
+    prev = None
+    for b in foot:
+        if id(b) in starts:
+            sx, sy, ex = starts[id(b)]
+        elif prev is not None:  # after the one before it, or at the start of the next row
+            sx, sy, ex = prev[2] + 2 * lh, prev[1], prev[2] + 2 * lh
+            if sx > x1 - 6 * lh:
+                sx, sy, ex = x0, prev[1] + (pitch / px if pitch else 1.2 * lh), x0 + 4 * lh
+        else:
+            continue
+        prev = (sx, sy, ex)
+        b.x, b.w, b.y = x0 * px, (x1 - x0) * px * 1.01, sy * px
+        b.indent = (sx - x0) * px
+        b.align = "left"
+        if pitch:
+            b.pitch = pitch
 
 
 def _follow_size(b: Block) -> None:
@@ -830,9 +918,11 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
             # the measure of its own lines: where most start, where the long ones end
             x0s, x1s = sorted(l.box.x0 for l in group), sorted(l.box.x1 for l in group)
             ex0, ex1 = x0s[round(0.2 * (len(x0s) - 1))], x1s[round(0.9 * (len(x1s) - 1))]
-            if not (0.8 * (ex1 - ex0) <= right - left <= 1.6 * (ex1 - ex0)):
+            centred_line = item.align == "center" and len(rows) == 1 and zone.role in ("column", "text")
+            if not centred_line and not (0.8 * (ex1 - ex0) <= right - left <= 1.6 * (ex1 - ex0)):
                 # a zone that is no column of it: a speck labelled footnotes, footnotes set in
                 # three columns inside a wide zone, a zone narrower than the text
+                # (a verse centred in its column keeps the column's measure)
                 left, right = ex0, ex0 + 1.02 * (ex1 - ex0)
             gy0, gy1 = min(l.box.y0 for l in group), max(l.box.y1 for l in group)
             # the column's note margins: kept free for all its text, as in print
@@ -903,6 +993,8 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
         block.fit = (n, size0, pitch)  # sized below, once the room down to the next block is known
         blocks.append(block)
 
+    set_footnotes(blocks, by_id, layout.line_height, px)
+
     # how far down each text block may reach: the top of the next block below it that it would
     # run into (same horizontal span; footnotes and pictures are blocks too), else the page's end.
     # Not its zone's end: a paragraph may run on from one band of columns into the next.
@@ -912,6 +1004,8 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
                  and o.x < b.x + b.w and b.x < o.x + o.w
                  and not (o.item is not None and o.item.kind == "dropcap")]  # a capital stands beside
         b.limit = min([height_pt, *below])
+        if b.item.label.startswith("footnotes"):
+            b.limit = height_pt  # a long footnote runs on into the next row, as printed
 
     # size every paragraph to the room it has: as many lines (at the original pitch) as fit down
     # to the next block, at least as many as the scan had
@@ -930,17 +1024,18 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
     text_blocks = [b for b in blocks if b.item is not None and not b.nowrap and b.item.kind in ("paragraph", "note")]
 
     def role(b: Block) -> str:
-        zone = zones.get(b.item.zone)
-        if b.item.label.startswith("footnotes") or (zone is not None and zone.role == "footnotes"):
+        if is_footnote(b.item, zones):
             return "footnotes"
         return "notes" if b.item.kind == "note" else "text"
 
     area_of = {id(b): (role(b), _ratio_of(b.item.text) == HEBREW_LETTER) for b in text_blocks}
     measures: dict[tuple, list[tuple[float, int]]] = {}
+    own: dict[int, tuple[float, int]] = {}
     for b in text_blocks:
-        em = measured_em(b.item, [by_id[i] for i in b.item.lines if i in by_id], ink, px)
-        if em:
-            measures.setdefault(area_of[id(b)], []).append((em, max(1, len(b.item.lines))))
+        m = measured_em(b.item, [by_id[i] for i in b.item.lines if i in by_id], ink, px)
+        if m:
+            own[id(b)] = m
+            measures.setdefault(area_of[id(b)], []).append((m[0], max(1, len(b.item.lines))))
     area_size = {area: _weighted_median(sorted(m)) for area, m in measures.items()}
     levels = size_levels([(size, sum(w for _, w in measures[area])) for area, size in area_size.items()], tol=0.06)
     for b in text_blocks:
@@ -951,10 +1046,19 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
             size = area_size[(area[0], False)]
         else:
             continue
+        # a block of text measured on many letters that is set clearly smaller or larger than its
+        # area (a verse quoted in smaller type) keeps its own size; a short reference does not
+        # (its figures and numerals make its measure unsteady)
+        if id(b) in own and own[id(b)][1] >= 20 and abs(own[id(b)][0] / size - 1) > 0.09:
+            text = plain(b.item.text)
+            if sum(c.isalpha() for c in text) >= 0.6 * len(text.replace(" ", "")):
+                size = own[id(b)][0]
+                if all(abs(level / size - 1) > 0.06 for level in levels):
+                    levels.append(size)
         b.size = b.level = min(levels, key=lambda level: abs(level - size))
         b.area = area[0] + (" (Hebrew)" if area[1] else "")
-        if b.item.kind == "note":
-            b.pitch = 0.0  # a note's line height follows its size
+        if b.item.kind == "note" and not b.item.label.startswith("footnotes"):
+            b.pitch = 0.0  # a margin note's line height follows its size (footnotes keep their rows')
     for b in blocks:
         _follow_size(b)
         b.start_size = b.size
@@ -1194,7 +1298,7 @@ def fit_round(target: Path, page_blocks: dict[int, list[Block]], pages_meta: lis
             if rendered["x1"] > block.x + block.w + 0.25 * block.size:
                 # a line wider than its box: a heading, or a word longer than a note's line
                 ratio = min(ratio, block.w / max(rendered["x1"] - block.x, 1.0))
-            if any(regions[j].y > block.y for j in measured.get("overlaps", []) if j < len(regions)):
+            if not block.item.label.startswith("footnotes") and any(regions[j].y > block.y for j in measured.get("overlaps", []) if j < len(regions)):
                 # its text reaches into the text of a block below (a heading's descenders): a step smaller
                 ratio = min(ratio, 0.97)
             if block.level:
