@@ -129,6 +129,56 @@ def vision_lines(image: Path, lang: tuple[str, ...], native: tuple[int, int], en
     return lines
 
 
+def ocr_coverage(lines: list[Line], layout: PageLayout) -> float:
+    """The share of the inked words in the text zones (OpenCV) that an OCR word covers."""
+    lh = layout.line_height
+    zones = [z.box for z in layout.zones if z.role in TEXT_ROLES]
+    inked = [w for w in layout.words if w.w >= 1.5 * lh
+             and any(z.x0 <= (w.x0 + w.x1) / 2 <= z.x1 and z.y0 <= (w.y0 + w.y1) / 2 <= z.y1 for z in zones)]
+    if not inked:
+        return 1.0
+    read = [b for l in lines for _, b in l.words]
+    hit = sum(1 for w in inked if any(c.x0 - 0.3 * lh <= (w.x0 + w.x1) / 2 <= c.x1 + 0.3 * lh
+                                      and c.y0 - 0.3 * lh <= (w.y0 + w.y1) / 2 <= c.y1 + 0.3 * lh for c in read))
+    return hit / len(inked)
+
+
+def zone_lines(layout: PageLayout, image: Path, engine, work: Path) -> list[Line]:
+    """Every text zone read on its own (a crop of `image`): Vision reads some pages whole only in
+    part (p. 995 of vol. 1: 54 words of the page; its two columns alone: 480 and 512)."""
+    from PIL import Image
+
+    from .models import PageImage
+
+    lh = layout.line_height
+    out: list[Line] = []
+    with Image.open(image) as im:
+        scale = im.width / layout.width
+        for z in layout.zones:
+            if z.role not in TEXT_ROLES:
+                continue
+            x0, y0 = max(0, z.box.x0 - 0.5 * lh), max(0, z.box.y0 - 0.5 * lh)
+            x1, y1 = min(layout.width, z.box.x1 + 0.5 * lh), min(layout.height, z.box.y1 + 0.5 * lh)
+            crop = im.crop((round(x0 * scale), round(y0 * scale), round(x1 * scale), round(y1 * scale)))
+            path = work / "zone.png"
+            crop.save(path)
+            page = PageImage(page_num=0, path=path, width_px=crop.width, height_px=crop.height, width_pt=1, height_pt=1, dpi=72)
+            by_line: dict[int, list] = {}
+            for word in engine.run(page).words:
+                by_line.setdefault(word.line if word.line is not None else -1, []).append(word)
+            for words in sorted(by_line.values(), key=lambda ws: min(w.bbox.y for w in ws)):
+                words.sort(key=lambda w: w.bbox.x)
+                boxes = [Box(round(x0 + w.bbox.x * (x1 - x0)), round(y0 + w.bbox.y * (y1 - y0)),
+                             round(x0 + (w.bbox.x + w.bbox.w) * (x1 - x0)), round(y0 + (w.bbox.y + w.bbox.h) * (y1 - y0)))
+                         for w in words]
+                box = boxes[0]
+                for b in boxes[1:]:
+                    box = box.union(b)
+                out.append(Line(f"L{len(out) + 1}", " ".join(w.text for w in words), box, [(w.text, b) for w, b in zip(words, boxes)]))
+        (work / "zone.png").unlink(missing_ok=True)
+    return out
+
+
 def recover_missed(lines: list[Line], layout: PageLayout, image: Path, engine, work: Path,
                    max_strips: int = 12) -> list[Line]:
     """Lines Vision left out of the whole page, read again from a strip of the page around them.
@@ -924,8 +974,12 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
             # the measure of its own lines: where most start, where the long ones end
             x0s, x1s = sorted(l.box.x0 for l in group), sorted(l.box.x1 for l in group)
             ex0, ex1 = x0s[round(0.2 * (len(x0s) - 1))], x1s[round(0.9 * (len(x1s) - 1))]
-            centred_line = item.align == "center" and len(rows) == 1 and zone.role in ("column", "text")
-            if not centred_line and not (0.8 * (ex1 - ex0) <= right - left <= 1.6 * (ex1 - ex0)):
+            # a measure from its lines needs two printed lines (one is often a fragment the OCR read
+            # of a paragraph whose text the model read from the scan: a 57 px "in" on p. 995)
+            one_line = len(rows) == 1 and zone.role in ("column", "text")
+            # nor do lines that hold less than half its text (the model read the rest from the scan)
+            read_elsewhere = len(plain(item.text)) > 2 * sum(len(l.text) for l in group) and zone.role in ("column", "text")
+            if not (one_line or read_elsewhere) and not (0.8 * (ex1 - ex0) <= right - left <= 1.6 * (ex1 - ex0)):
                 # a zone that is no column of it: a speck labelled footnotes, footnotes set in
                 # three columns inside a wide zone, a zone narrower than the text
                 # (a verse centred in its column keeps the column's measure)
@@ -1357,8 +1411,8 @@ def prep_key(pdf_path: Path, lang: tuple[str, ...]) -> str:
     here = Path(__file__).resolve().parent
     h = hashlib.sha1(f"{pdf_path.resolve()}|{pdf_path.stat().st_size}|{lang}".encode())
     h.update((here / "page_layout.py").read_bytes())
-    for step in (prepare_page, native_dpi, render, vision_lines, recover_missed, measure_glyphs, assign,
-                 clip_pictures, Line):
+    for step in (prepare_page, native_dpi, render, vision_lines, ocr_coverage, zone_lines, recover_missed,
+                 measure_glyphs, assign, clip_pictures, Line):
         h.update(inspect.getsource(step).encode())
     return h.hexdigest()
 
@@ -1402,6 +1456,11 @@ def prepare_page(pdf_path: Path, n: int, out: Path, lang: tuple[str, ...], key: 
     layout = analyse(pw / "native.png")
     draw(pw / "native.png", layout, pw / "layout.png", scale=0.25)
     read = vision_lines(pw / "vision.png", lang, native, engine)
+    if ocr_coverage(read, layout) < 0.9:
+        # Vision read the page whole only in part: its zones one by one, if that reads more
+        by_zone = zone_lines(layout, pw / "vision.png", engine, pw)
+        if ocr_coverage(by_zone, layout) > ocr_coverage(read, layout):
+            read = by_zone
     recovered = recover_missed(read, layout, pw / "vision.png", engine, pw)
     lines = assign(read + recovered, layout)
     measure_glyphs(lines, pw / "native.png")
