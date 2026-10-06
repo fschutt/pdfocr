@@ -27,6 +27,12 @@ import numpy as np
 
 # glyphs the compositor set as one piece: several letters, one box (longest first)
 LIGATURES = ("ſſi", "ſſl", "ffi", "ffl", "ſſ", "ſt", "ſi", "ſl", "ſh", "ſb", "ſk", "ff", "fi", "fl", "ct")
+# the ligatures the compositor set as a rule (vol. 1: joined some 5 to 10 times for each time apart;
+# ſi was set apart four times in five)
+SET_LIGATURES = ("ffi", "ffl", "ff", "fi", "fl", "ct", "ſſi", "ſſ", "ſt", "ſl", "ſh")
+# a long s before any letter but these (and round at a word's end, before an apostrophe): vol. 1,
+# 757,519 words: before f 0 long of 177, b 6 of 152, k 5 of 287; at the end 188 of 78,061
+ROUND_S_BEFORE = "fbk"
 # letters that stand on the baseline (no descender): what a word's baseline is measured on
 ON_BASELINE = set("acehiklmnorstuvwxzABCDEFGHIKLMNORSTUVWXZ")
 X_HEIGHT = set("acemnorsuvwxz")
@@ -329,28 +335,40 @@ def side_bearings(glyphs: list[tuple], least: int = 30) -> tuple[dict, dict, dic
     letters = sorted({c for p in pairs for c in p})
     index = {c: i for i, c in enumerate(letters)}
     n = len(letters)
-    rows, rhs, weights = [], [], []
-    for (a, b), gap in pairs.items():
-        row = np.zeros(2 * n)
-        row[n + index[a]] += 1.0  # right of a
-        row[index[b]] += 1.0  # left of b
-        rows.append(row)
-        rhs.append(gap)
-        weights.append(np.sqrt(len(gaps[(a, b)])))
-    strong = np.sqrt(max(weights, default=1.0))
-    for c in letters:
-        # a round letter's bearings alike; a capital's, more or less (its left one is seen only
-        # after another capital)
-        if c in "onlimuxOHI" or (len(c) == 1 and c.isupper()):
+
+    def solve(capital_left: float | None):
+        rows, rhs, weights = [], [], []
+        for (a, b), gap in pairs.items():
             row = np.zeros(2 * n)
-            row[index[c]], row[n + index[c]] = 1.0, -1.0
+            row[n + index[a]] += 1.0  # right of a
+            row[index[b]] += 1.0  # left of b
             rows.append(row)
-            rhs.append(0.0)
-            weights.append(strong if c in "onlimuxOHI" else 0.3 * strong)
-    if not rows:
+            rhs.append(gap)
+            weights.append(np.sqrt(len(gaps[(a, b)])))
+        strong = np.sqrt(max(weights, default=1.0))
+        for c in letters:
+            row = np.zeros(2 * n)
+            if c in "onlimux":  # a round letter's bearings alike
+                row[index[c]], row[n + index[c]] = 1.0, -1.0
+                rows.append(row)
+                rhs.append(0.0)
+                weights.append(strong)
+            elif len(c) == 1 and c.isupper() and capital_left is not None:
+                # a capital's left bearing is seen only after another capital (in the spaced
+                # headwords, left out): as the small letters' are. (Its right one is seen; taken
+                # alike, an italic V's overhang to the right set its ink 7 pt into the space before.)
+                row[index[c]] = 1.0
+                rows.append(row)
+                rhs.append(capital_left)
+                weights.append(0.3 * strong)
+        A, y, w = np.array(rows), np.array(rhs), np.array(weights)
+        return np.linalg.lstsq(A * w[:, None], y * w, rcond=None)[0]
+
+    if not pairs:
         return {}, {}, {}
-    A, y, w = np.array(rows), np.array(rhs), np.array(weights)
-    solution, *_ = np.linalg.lstsq(A * w[:, None], y * w, rcond=None)
+    first = solve(None)
+    small = [first[index[c]] for c in letters if len(c) == 1 and c.islower()]
+    solution = solve(float(np.median(small)) if small else 0.02)
     left = {c: float(solution[index[c]]) for c in letters}
     right = {c: float(solution[n + index[c]]) for c in letters}
     kerns = {}
@@ -716,7 +734,8 @@ def build_font(style: str, shapes_: dict, metrics_: dict, family: str, path: Pat
         hmtx[name] = (max(advance, 1), round(x_min))
         glyph_order.append(name)
         advances[c] = advance / UPM
-        if len(c) == 1:
+        # (the long s is drawn for an s by the font's `calt`: the text keeps its s, and copies as s)
+        if len(c) == 1 and c != "ſ":
             cmap[ord(c)] = name
         svgs.append((name, c, svg_path(fixed), advance))
     fb = FontBuilder(UPM, isTTF=True)
@@ -739,10 +758,14 @@ def build_font(style: str, shapes_: dict, metrics_: dict, family: str, path: Pat
                 achVendID="PDFO")
     fb.setupPost(italicAngle=-14 if style == "italic" else 0)
     fb.setupHead(macStyle=0x02 if style == "italic" else 0)
-    # the ligatures the compositor set (where the text has their letters), and the kerns
-    # (only the compositor's: a pair Vision boxed as one where its letters touch is no ligature)
-    ligs = [c for c in sources if c in LIGATURES and all(ch in sources for ch in c) and "ſ" not in c]
+    # the long s where the book has one (`calt`, before the ligatures: ſt, ſſ are made of it), the
+    # ligatures the compositor set as a rule, and the kerns
     fea = []
+    if "ſ" in sources and "s" in sources:
+        after = [glyph_name(c) for c in sources if len(c) == 1 and c.isalpha() and c.islower() and c not in ROUND_S_BEFORE
+                 and c != "ſ"]
+        fea.append("feature calt {\n  sub s' [" + " ".join(sorted(after)) + "] by longs;\n} calt;")
+    ligs = [c for c in sources if c in SET_LIGATURES and all(ch in sources for ch in c)]
     if ligs:
         fea.append("feature liga {\n" + "".join(
             f"  sub {' '.join(glyph_name(ch) for ch in lig)} by {glyph_name(lig)};\n"
@@ -753,7 +776,8 @@ def build_font(style: str, shapes_: dict, metrics_: dict, family: str, path: Pat
         fea.append("feature kern {\n" + "".join(f"  pos {glyph_name(a)} {glyph_name(b)} {round(v * UPM)};\n"
                                                for a, b, v in kerns) + "} kern;")
     if fea:
-        addOpenTypeFeaturesFromString(fb.font, "\n".join(fea))
+        # (for the Latin script by name as well: a shaper that asks for `latn` finds them too)
+        addOpenTypeFeaturesFromString(fb.font, "languagesystem DFLT dflt;\nlanguagesystem latn dflt;\n" + "\n".join(fea))
     path.parent.mkdir(parents=True, exist_ok=True)
     fb.save(str(path))
     if svg_dir is not None:
@@ -777,6 +801,26 @@ def _contains(contour, point) -> bool:
     return inside
 
 
+def _cached_shapes(cache: Path, pages: list[dict], dirs: list[Path], log) -> dict:
+    """`shapes`, kept in `cache` as long as the glyphs and the code that averages them are."""
+    import hashlib
+    import inspect
+    import pickle
+
+    key = hashlib.sha1((str(SCAN_VERSION) + str(len(dirs)) + "".join(
+        inspect.getsource(f) for f in (samples, _choose, _print_of, shapes))).encode()).hexdigest()
+    if cache.exists():
+        try:
+            saved = pickle.loads(cache.read_bytes())
+            if saved.get("key") == key:
+                return saved["shapes"]
+        except Exception:
+            pass
+    averaged = shapes(pages, dirs, log=log)
+    cache.write_bytes(pickle.dumps({"key": key, "shapes": averaged}))
+    return averaged
+
+
 def build(out: Path, family: str = "Book", workers: int = 4, log=print) -> Path:
     """All four steps for a `reconstruct` run in `out` (its work/ directory): writes
     out/typeface/ with FAMILY-Regular.ttf, FAMILY-Italic.ttf, each glyph as SVG, and
@@ -792,8 +836,9 @@ def build(out: Path, family: str = "Book", workers: int = 4, log=print) -> Path:
     pages = scan(work, workers, log)
     log(f"{sum(len(p['glyphs']) for p in pages)} glyphs on {len(pages)} pages in {time.perf_counter() - start:.0f}s")
     measured = metrics(pages)
-    averaged = shapes(pages, dirs, log=log)
     target = out / "typeface"
+    target.mkdir(parents=True, exist_ok=True)
+    averaged = _cached_shapes(target / "shapes.pkl", pages, dirs, log)
     files = {"roman": f"{family.replace(' ', '')}-Regular.ttf", "italic": f"{family.replace(' ', '')}-Italic.ttf"}
     names = {"roman": family, "italic": f"{family} Italic"}
     build_font("roman", averaged, measured, names["roman"], target / files["roman"], svg_dir=target / "svg")
