@@ -670,10 +670,12 @@ def own_extent(text: str, group: list[Line]) -> Box | None:
 
 
 def _majority_zone(group: list[Line], default: str) -> str:
+    """The zone most of the text of `group` stands in (by characters: a line Vision ran across a
+    margin note is split into a long piece in the column and a short one in the note strip)."""
     counts: dict[str, int] = {}
     for line in group:
         if line.zone:
-            counts[line.zone] = counts.get(line.zone, 0) + 1
+            counts[line.zone] = counts.get(line.zone, 0) + max(1, len(line.text))
     return max(counts, key=counts.get) if counts else default
 
 
@@ -972,7 +974,16 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
         else:
             left, right = zone.box.x0, zone.box.x1
             # the measure of its own lines: where most start, where the long ones end
-            x0s, x1s = sorted(l.box.x0 for l in group), sorted(l.box.x1 for l in group)
+            # (the pieces of each printed line joined: the layout may cut a band into narrow zones,
+            # and assign() splits a line by them)
+            row_boxes: list[list[float]] = []
+            for l in sorted(group, key=lambda l: l.box.y0):
+                if row_boxes and l.box.y0 - row_boxes[-1][2] <= 0.5 * layout.line_height:
+                    row_boxes[-1][0] = min(row_boxes[-1][0], l.box.x0)
+                    row_boxes[-1][1] = max(row_boxes[-1][1], l.box.x1)
+                else:
+                    row_boxes.append([l.box.x0, l.box.x1, l.box.y0])
+            x0s, x1s = sorted(r[0] for r in row_boxes), sorted(r[1] for r in row_boxes)
             ex0, ex1 = x0s[round(0.2 * (len(x0s) - 1))], x1s[round(0.9 * (len(x1s) - 1))]
             # a measure from its lines needs two printed lines (one is often a fragment the OCR read
             # of a paragraph whose text the model read from the scan: a 57 px "in" on p. 995)
@@ -990,8 +1001,10 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
                 left = max(left, margin_of[(zone.id, "left")][1] + 0.5 * layout.line_height)
             if (zone.id, "right") in margin_of:
                 right = min(right, margin_of[(zone.id, "right")][0] - 0.5 * layout.line_height)
-            # note strips the layout found inside the column's width count as its margin too
-            strips = [(z.box.x0, z.box.y0, z.box.x1, z.box.y1) for z in layout.of("notes")]
+            # note strips the layout found inside the column's width count as its margin too (not
+            # those its own lines stand in: the layout may cut a band of text into narrow strips)
+            own_zones = {l.zone for l in group}
+            strips = [(z.box.x0, z.box.y0, z.box.x1, z.box.y1) for z in layout.of("notes") if z.id not in own_zones]
             for nx0, ny0, nx1, ny1, *_ in inner_notes + strips:
                 if min(ny1, gy1) - max(ny0, gy0) < 0.5 * layout.line_height or nx1 < left or nx0 > right:
                     continue  # not beside this paragraph
@@ -1000,7 +1013,8 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
                 elif (nx0 + nx1) / 2 > right - 0.3 * (right - left):
                     right = nx0 - 0.5 * layout.line_height
             if right - left < 0.5 * zone.box.w and right - left < 0.5 * (ex1 - ex0):
-                left, right = ex0, ex0 + 1.02 * (ex1 - ex0)  # not a margin: the notes took most of it
+                # not a margin: the notes took most of it (a column: its own measure)
+                left, right = (zone.box.x0, zone.box.x1) if zone.role in ("column", "text") else (ex0, ex0 + 1.02 * (ex1 - ex0))
             x0, w = left * px, (right - left) * px
         text = item.text
         font = _times(item.italic)
@@ -1044,8 +1058,13 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
                     rest.fit = (n - k, size, pitch)  # sized with the others, to the room below it
                     blocks.append(rest)
                 continue
-        indent = max(0.0, first.box.x0 * px - x0) if item.kind == "paragraph" and part_no == 0 else 0.0
-        indent = indent if indent > 0.5 * size0 else 0.0
+        # the first-line indent: from its topmost line inside the block (Vision runs a line across
+        # both columns; its piece from the other column is no indent: 717 pt in a 691 pt block
+        # set the line beyond the block, p. 689), and no more than an indent can be
+        inside = [l for l in group if x0 - size0 <= l.box.x0 * px <= x0 + w]
+        lead = min(inside, key=lambda l: (l.box.y0, l.box.x0)) if inside else first
+        indent = max(0.0, lead.box.x0 * px - x0) if item.kind == "paragraph" and part_no == 0 else 0.0
+        indent = indent if 0.5 * size0 < indent <= min(6 * size0, 0.3 * w) else 0.0
         align = item.align if item.kind == "paragraph" else "left"
         if item.kind == "heading":
             align = item.align if item.align != "justify" else "left"
