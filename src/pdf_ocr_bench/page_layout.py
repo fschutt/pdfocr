@@ -246,8 +246,9 @@ def _split(text: np.ndarray, words: np.ndarray, box: Box, lh: float, out: list[t
     gutters = [(a, b) for a, b in _runs(free, 0) if b - a >= min_gutter and a > 0 and b < box.w]
     if not gutters and tall and box.w >= 0.6 * text.shape[1]:
         # a page of two columns over many lines of footnotes across the page: more than a tenth
-        # of the lines cross its gutter (a fifth do not, in a column of text)
-        free = occupancy <= max(2.0, 0.2 * dense)
+        # of the lines cross its gutter (a quarter on p. 280 of vol. 1), and step 3 sets them
+        # apart; in a column of text a third do not cross any x of its middle half
+        free = occupancy <= max(2.0, 0.35 * dense)
         gutters = [(a, b) for a, b in _runs(free, 0) if b - a >= 2 * min_gutter and a > 0.25 * box.w and b < 0.75 * box.w]
     if not gutters or depth > 12:
         out.append((box, "block"))

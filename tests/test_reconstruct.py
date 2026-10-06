@@ -111,6 +111,54 @@ def test_answer_is_checked_against_the_ocr_lines():
     assert to_items(lost, lines, layout) is None  # most of the page's text left out
 
 
+def test_a_line_listed_for_two_items_belongs_to_the_one_whose_text_has_it():
+    layout = _layout()
+    lines = [Line("L1", "reigned three years eight months, and", Box(100, 100, 900, 130), [], "column0"),
+             Line("L2", "Cleopatra reigned from 3957, and killed", Box(100, 140, 900, 170), [], "column0"),
+             Line("L3", "herfelf in 3974. The City of Alexandria", Box(100, 180, 900, 210), [], "column0")]
+    answer = {"items": [
+        {"zone": "column0", "kind": "paragraph", "lines": ["L1", "L2", "L3"], "text": "reigned three years eight months, and died."},
+        {"zone": "column0", "kind": "paragraph", "lines": ["L2", "L3"],
+         "text": "Cleopatra reigned from 3957, and killed herself in 3974. The City of Alexandria"},
+    ]}
+    assert [i.lines for i in to_items(answer, lines, layout)] == [["L1"], ["L2", "L3"]]
+
+
+def test_a_column_part_ends_at_the_word_the_ocr_read_last_in_the_column():
+    from pdf_ocr_bench.reconstruct import column_parts
+
+    first = [Line("A1", "Ptolemy Euergetes or Physcon, reigned", Box(100, 800, 480, 830), [], "column0")]
+    # the next column's lines as Vision read them, a word short: by characters the first part
+    # would take "fifty three" too
+    rest = [Line("B1", "fifty three years, part", Box(520, 100, 900, 130), [], "column1"),
+            Line("B2", "his Brother", Box(520, 140, 900, 170), [], "column1")]
+    text = "Ptolemy Euergetes or Physcon, reigned fifty three years, part with his Brother Philometer."
+    parts = column_parts(Item("column0", text, ["A1", "B1", "B2"]), first + rest, 30)
+    assert [p.text for p, _ in parts] == ["Ptolemy Euergetes or Physcon, reigned",
+                                          "fifty three years, part with his Brother Philometer."]
+    # a word the print divided between the columns goes on to the next part
+    hyphen = [Line("A1", "the chief City of Judæa, on the fide of Sama-", Box(100, 800, 480, 830), [], "column0")]
+    text = "the chief City of Judæa, on the side of Samaria, near the frontiers of Ephraim."
+    parts = column_parts(Item("column0", text, ["A1", "B1"]), hyphen + rest[:1], 30)
+    assert parts[0][0].text.endswith("side of") and parts[1][0].text.startswith("Samaria,")
+
+
+def test_a_note_is_found_by_its_words_that_vision_ran_into_the_text():
+    from pdf_ocr_bench.reconstruct import locate
+
+    def words(y, *spec):
+        return [(t, Box(x0, y, x1, y + 30)) for t, x0, x1 in spec]
+    lines = [Line("L1", "accusers would haveLuk. xxiii.", Box(100, 100, 800, 130),
+                  words(100, ("accusers", 100, 300), ("would", 320, 450), ("haveLuk.", 470, 700), ("xxiii.", 720, 800)), "column0"),
+             Line("L2", "to our Matth.", Box(100, 300, 900, 330),
+                  words(300, ("to", 100, 150), ("our", 170, 250), ("Matth.", 800, 900)), "column0")]
+    box, _ = locate("Luk. xxiii. 2.", lines, 30)
+    assert box.y0 == 100 and 550 < box.x0 < 700  # its share of "haveLuk.", not the text's "have"
+    box, _ = locate("Matth. xxi.16,17.", lines, 30)  # its figures unread: the name alone will do
+    assert (box.x0, box.y0) == (800, 300)
+    assert locate("Gen. xii. 3.", lines, 30) is None
+
+
 def test_pitch_ignores_the_order_lines_are_listed_in_and_notes_keep_their_margin():
     layout = PageLayout(width=1000, height=1000, line_height=30)
     layout.zones = [Zone("column", Box(100, 100, 900, 600), 0)]

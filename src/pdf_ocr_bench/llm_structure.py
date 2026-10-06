@@ -101,9 +101,19 @@ def to_items(answer: dict, lines: list, layout: PageLayout):
 
     known = {l.id: l for l in lines}
     zones = {z.id for z in layout.zones}
+    answered = answer.get("items", [])
+    # a line the answer lists for two items (the last lines of one paragraph and the first of the
+    # next) belongs to the one whose text has it; the other would be set where it is not printed
+    claims: dict[str, list[int]] = {}
+    for k, a in enumerate(answered):
+        for i in dict.fromkeys(a.get("lines", [])):
+            if i in known:
+                claims.setdefault(i, []).append(k)
+    owner = {i: max(ks, key=lambda k: (_shared_pairs(known[i].text, plain(answered[k].get("text", ""))), -k))
+             for i, ks in claims.items()}
     items, used = [], set()
-    for a in answer.get("items", []):
-        ids = [i for i in a.get("lines", []) if i in known and i not in used]
+    for k, a in enumerate(answered):
+        ids = [i for i in dict.fromkeys(a.get("lines", [])) if i in known and owner[i] == k]
         used.update(ids)
         text = clean_marks(normalize_markup(a.get("text", "").strip()))
         if a.get("kind") == "noise" or not plain(text).strip():
@@ -120,6 +130,15 @@ def to_items(answer: dict, lines: list, layout: PageLayout):
     if missing > 0.15 * total:
         return None
     return items
+
+
+def _shared_pairs(line: str, text: str) -> int:
+    """How many pairs of adjacent words of `line` (OCR, f or ſ for a long s) are in `text`."""
+    def pairs(s: str) -> set[tuple[str, str]]:
+        words = re.findall(r"\w+", s.lower().replace("ſ", "s").replace("f", "s"))
+        return set(zip(words, words[1:]))
+
+    return len(pairs(line) & pairs(text))
 
 
 # `claude -p` ran into the subscription's limit: asking further pages only uploads them for nothing
