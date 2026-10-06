@@ -752,6 +752,84 @@ def row_extent(group: list[Line], lh: float, ragged: bool = False) -> tuple[floa
     return x0s[round(0.2 * (len(x0s) - 1))], x1s[(len(x1s) - 1) // 2 if len(x1s) >= 3 and not ragged else -1], len(rows)
 
 
+def text_edges(ink, e0: float, e1: float, y0: float, y1: float, lh: float, rows: int,
+               words: list | None = None, text: str = "") -> tuple[float, float]:
+    """Where a paragraph's text starts and ends (`e0`..`e1`: where its lines do, its `rows` rows
+    `y0`..`y1`, px), when margin notes are printed close against it (6 pt) and Vision ran them
+    into its lines: then its lines end where the notes do (vol. 1 p. 245: the column measured
+    1696 pt wide to 1610 printed, its paragraphs set over their notes). At a valley of ink down
+    its rows near its edge (six rows of justified text have none of their own), with notes
+    beyond it: past a white line, or sparser than the text, or in a dozen rows or more. And the
+    words of its lines (`words`) beyond the cut must be no words of its `text` (the model set the
+    notes apart): a river of spaces down seven rows, or lines that start where they please (an
+    indent, a quotation mark), leave its own words there (p. 433, p. 823)."""
+    import numpy as np
+
+    if ink is None or rows < 6:
+        return e0, e1
+    a, b = max(0, int(e0)), min(ink.shape[1], int(e1) + 1)
+    band = ink[max(0, int(y0)):min(ink.shape[0], int(y1)), a:b]
+    reach, least, beyond = int(8 * lh), max(2, int(0.15 * lh)), int(1.5 * lh)
+    if band.shape[1] < 3 * reach:
+        return e0, e1
+    cols = band.sum(axis=0).astype(float)
+    body = float(np.median(cols[reach:-reach]))
+    # (in a dozen rows or more, a fifth will do: where few lines have ink, the notes touch it)
+    many = rows >= 12
+    low = cols <= (0.2 if many else 0.15) * body
+    least = 2 if many else least
+
+    def edge(order: list[int]) -> int | None:
+        # walking out of the text to its edge: the first valley is where it ends (its last, or
+        # first, inked column), if notes stand beyond
+        run = 0
+        for k, i in enumerate(order):
+            if low[i]:
+                run += 1
+                continue
+            if run >= least:
+                if k - run < 1:
+                    return None
+                notes = cols[order[k:]]
+                notes = notes[notes > 0.15 * body]
+                clean = cols[order[k - run:k]].min() <= 0.01 * body  # a white line in it
+                if len(notes) >= beyond and (clean or many or notes.mean() <= 0.6 * body):
+                    return order[k - run - 1]
+                return None
+            run = 0
+        return None
+
+    def notes_beyond(cut: float, side: str) -> bool:
+        # (words with a letter or figure: a quotation mark opens each line of a quotation)
+        if not words or not text:
+            return True
+        own: dict[str, int] = {}
+        for t in plain(text).split():
+            k = _norm_word(t)
+            own[k] = own.get(k, 0) + 1
+        keyed = [(_norm_word(t), (b.x0 + b.x1) / 2) for t, b in words if _norm_word(t)]
+        outside = [k for k, c in keyed if (c > cut if side == "right" else c < cut)]
+        for k, c in keyed:  # its own words read inside the cut
+            if (c <= cut if side == "right" else c >= cut) and own.get(k, 0) > 0:
+                own[k] -= 1
+        mine = 0
+        for k in outside:
+            if own.get(k, 0) > 0:
+                own[k] -= 1
+                mine += 1
+        return mine <= 0.3 * len(outside)
+
+    w = len(cols)
+    new0, new1 = e0, e1
+    right = edge(list(range(w - reach, w)))
+    if right is not None and notes_beyond(a + right + 1, "right"):
+        new1 = a + right + 1
+    left = edge(list(range(reach, -1, -1)))
+    if left is not None and notes_beyond(a + left, "left"):
+        new0 = a + left
+    return new0, new1
+
+
 def _majority_zone(group: list[Line], default: str) -> str:
     """The zone most of the text of `group` stands in (by characters: a line Vision ran across a
     margin note is split into a long piece in the column and a short one in the note strip)."""
@@ -1043,6 +1121,8 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
             if not g:
                 continue
             e0, e1, n_rows = row_extent(g, layout.line_height)
+            e0, e1 = text_edges(ink, e0, e1, min(l.box.y0 for l in g), max(l.box.y1 for l in g), layout.line_height, n_rows,
+                                [w for l in g for w in l.words], part.text)
             if n_rows >= 3 and len(plain(part.text)) <= 2 * sum(len(l.text) for l in g) and e1 - e0 > 4 * layout.line_height:
                 spans.append((e0, e1))
                 spans_at.append((e0, e1, min(l.box.y0 for l in g), max(l.box.y1 for l in g)))
@@ -1215,7 +1295,10 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
             # the measure of its own lines: where most start, where the long ones end
             # (the pieces of each printed line joined: the layout may cut a band into narrow zones,
             # and assign() splits a line by them)
-            ex0, ex1, _ = row_extent(group, layout.line_height, ragged=item.kind == "note")
+            ex0, ex1, n_rows = row_extent(group, layout.line_height, ragged=item.kind == "note")
+            if item.kind == "paragraph":  # (the notes Vision ran into its lines are no part of it)
+                ex0, ex1 = text_edges(ink, ex0, ex1, min(l.box.y0 for l in group), max(l.box.y1 for l in group),
+                                      layout.line_height, n_rows, [w for l in group for w in l.words], item.text)
             measure = measure_for(ex0, ex1) if len(rows) >= 2 or zone.role in ("column", "text") else None
             if measure is not None:
                 # the column's text measure, as its paragraphs are printed (its zone may take in a
