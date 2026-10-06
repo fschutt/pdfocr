@@ -577,12 +577,33 @@ def place_lineless(items: list[Item], lines: list[Line], layout: PageLayout) -> 
     made: list[Line] = []
     floating: set[str] = set()
     prev: list[Line] = []
+    # the words of each line its items' texts do not account for (a margin note Vision ran into
+    # the line: "Jor-Aden" of the text is the text's, "Jor-aden." at the line's end the note's)
+    owners: dict[str, list[str]] = {}
+    for it in items:
+        for i in it.lines:
+            owners.setdefault(i, []).append(it.text)
+    loose = []
+    for l in lines:
+        left: dict[str, int] = {}
+        for t in owners.get(l.id, []):
+            for w in plain(t).split():
+                k = _norm_word(w)
+                left[k] = left.get(k, 0) + 1
+        free = []
+        for t, b in l.words:
+            k = _norm_word(t)
+            if left.get(k, 0) > 0:
+                left[k] -= 1
+            else:
+                free.append((t, b))
+        loose.append(replace(l, words=free))
     for k, item in enumerate(items):
         own = [l for l in lines + made if l.id in item.lines]
         if own:
             prev = own
             continue
-        hit = locate(item.text, lines, lh)
+        hit = locate(item.text, loose, lh)
         strips = [z for z in layout.zones if z.role == "notes"]
         if not hit and _ratio_of(item.text) == HEBREW_LETTER:
             hit = unread_ink(layout, lines + made, prev, lh)
@@ -695,6 +716,7 @@ def _majority_zone(group: list[Line], default: str) -> str:
     return max(counts, key=counts.get) if counts else default
 
 
+FOOT_MARK = re.compile(r"\s*(?:<sup>[^<]{1,3}</sup>|<i>[a-z]</i>\s|[ᵃᵇᶜᵈᵉᶠᵍʰⁱʲᵏˡᵐⁿᵒᵖʳˢᵗᵘᵛʷˣʸᶻ*†‡§‖¶])")
 HEBREW_LETTER = 0.56  # height of a Hebrew letter in azul's Times, em (x-height 0.448, capitals 0.662)
 
 
@@ -871,6 +893,14 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
             g = [by_id[i] for i in it.lines if i in by_id]
             if it.kind in ("paragraph", "note") and g and min(l.box.y0 for l in g) >= foot_top and "foot" not in it.label.lower():
                 it.label = "footnotes (below the text)"
+    # and by their reference marks, in the lower part of the page (a page the layout left as one
+    # block has no columns to be below: p. 445)
+    marked = [it for it in items if it.kind in ("paragraph", "note") and FOOT_MARK.match(it.text)
+              and (g := [by_id[i] for i in it.lines if i in by_id]) and min(l.box.y0 for l in g) > 0.6 * layout.height]
+    if len(marked) >= 2:
+        for it in marked:
+            if "foot" not in it.label.lower():
+                it.label = "footnotes (marked)"
 
     def em_of(group: list[Line]) -> float:
         # a Vision line box is cap height + descender, ~1.05 em for this kind of face
