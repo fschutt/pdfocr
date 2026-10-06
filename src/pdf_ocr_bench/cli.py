@@ -116,8 +116,10 @@ def run_cmd(input_pdf, output_dir, engines, lang, dpi, pages, preprocess, engine
 @click.option("--fresh-layout", is_flag=True, help="render, analyse and read every page again (else a page prepared by the same code is reused)")
 @click.option("--thinking/--no-thinking", default=True, show_default=True,
               help="let the model think before it answers (--no-thinking: much faster, e.g. with haiku)")
+@click.option("--typeface", type=click.Path(exists=True, file_okay=False, path_type=Path), default=None,
+              help="set the text in the book's own fonts (a `pdf-ocr-bench typeface` directory) instead of Times")
 @click.option("-v", "--verbose", is_flag=True)
-def reconstruct_cmd(input_pdf, output_dir, pages, lang, semantic_context, model, agents, workers, no_llm, zoom, fit_rounds, learn_from, redo, fresh_layout, thinking, verbose) -> None:
+def reconstruct_cmd(input_pdf, output_dir, pages, lang, semantic_context, model, agents, workers, no_llm, zoom, fit_rounds, learn_from, redo, fresh_layout, thinking, typeface, verbose) -> None:
     """Rebuild scanned pages as structured HTML: OpenCV layout, macOS Vision text, an LLM's structure.
 
     Writes OUTPUT_DIR/pages.zip for html2pdf (columns, notes beside their lines, drop capitals,
@@ -148,7 +150,29 @@ def reconstruct_cmd(input_pdf, output_dir, pages, lang, semantic_context, model,
             raise click.UsageError(f"--learn-from {learn_from}: no answered pages in its work/ directory")
     reconstruct(input_pdf, output_dir, selected, route.lang, html_lang(languages), semantic_context,
                 llm=not no_llm, model=model, agents=agents, fit_rounds=fit_rounds, zoom=zoom, guide=guide,
-                thinking=thinking, workers=workers, redo=redo_pages, fresh_layout=fresh_layout)
+                thinking=thinking, workers=workers, redo=redo_pages, fresh_layout=fresh_layout, typeface=typeface)
+
+
+@main.command("typeface")
+@click.argument("output_dir", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--family", default="Book", show_default=True, help="the fonts' family name (FAMILY, FAMILY Italic)")
+@click.option("--workers", type=click.IntRange(1), default=4, show_default=True, help="pages scanned at once")
+@click.option("-v", "--verbose", is_flag=True)
+def typeface_cmd(output_dir, family, workers, verbose) -> None:
+    """Rebuild the book's typeface from the scans of a `reconstruct` run in OUTPUT_DIR.
+
+    Finds every letter of every page (macOS Vision's glyph boxes, lined up with the words the
+    model read), measures each letter's width and side bearings and the word space, averages
+    its shape over hundreds of prints, traces it, and writes TrueType fonts (roman, italic) to
+    OUTPUT_DIR/typeface/, for `reconstruct --typeface OUTPUT_DIR/typeface`.
+    """
+    from .typeface import build
+
+    setup_logging(verbose)
+    try:
+        build(output_dir, family, workers, log=get_logger("Typeface").info)
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from exc
 
 
 @main.command("check")

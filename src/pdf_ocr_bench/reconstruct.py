@@ -383,10 +383,52 @@ def _line_by_id(lines: list[Line], line_id: str) -> Line:
 # --- 6. HTML ---------------------------------------------------------------------------------
 
 
+# the book's own fonts (`reconstruct --typeface`, built by `pdf-ocr-bench typeface`), else Times:
+# families, files, x-height and cap height (em), and a key of the fonts (for the fit cache)
+TYPEFACE: dict = {}
+
+
+def use_typeface(path: Path | None) -> None:
+    """Set the text in the fonts of a `pdf-ocr-bench typeface` directory (None: in Times)."""
+    import hashlib
+
+    TYPEFACE.clear()
+    _FONTS.clear()
+    if path is None:
+        return
+    info = json.loads((path / "typeface.json").read_text(encoding="utf-8"))
+    files = {style: (path / name).resolve() for style, name in info["files"].items()}
+    roman = info["metrics"]["roman"]["glyphs"]
+    TYPEFACE.update(families=info["families"], files=files,
+                    x=roman.get("x", {}).get("top", TIMES_X), cap=roman.get("H", {}).get("top", TIMES_CAP),
+                    key=hashlib.sha1(b"".join(f.read_bytes() for f in files.values())).hexdigest())
+
+
+def font_family(italic: bool = False) -> str:
+    """The CSS font-family of the text: the book's fonts (Times for what they lack), or Times."""
+    if not TYPEFACE:
+        return FONT_FAMILY
+    return f"'{TYPEFACE['families']['italic' if italic else 'roman']}', {FONT_FAMILY}"
+
+
+def html2pdf_fonts() -> list[str]:
+    """html2pdf's --font arguments for the book's fonts."""
+    return [arg for style in ("roman", "italic") if TYPEFACE
+            for arg in ("--font", f"{TYPEFACE['families'][style]}={TYPEFACE['files'][style]}")]
+
+
+_FONTS: dict = {}
+
+
 def _times(italic: bool = False):
+    """The text's font for measuring: the book's (`--typeface`), else Times."""
     import pymupdf
 
-    return pymupdf.Font("tiit" if italic else "tiro")  # Times-Italic / Times-Roman metrics
+    key = "italic" if italic else "roman"
+    if key not in _FONTS:
+        _FONTS[key] = (pymupdf.Font(fontfile=str(TYPEFACE["files"][key])) if TYPEFACE
+                       else pymupdf.Font("tiit" if italic else "tiro"))  # Times-Italic / Times-Roman
+    return _FONTS[key]
 
 
 def wrap_lines(text: str, width_pt: float, size: float, font, indent: float = 0.0) -> int:
@@ -848,13 +890,14 @@ HEBREW_LETTER = 0.56  # height of a Hebrew letter in azul's Times, em (x-height 
 def _ratio_of(text: str) -> float:
     """Glyph height / em for the main script of `text`."""
     letters = [c for c in plain(text) if c.isalpha()]
+    cap, x = TYPEFACE.get("cap", TIMES_CAP), TYPEFACE.get("x", TIMES_X)
     if not letters:
-        return TIMES_CAP  # figures: as tall as capitals
+        return cap  # figures: as tall as capitals
     if sum("\u0590" <= c <= "\u05ff" for c in letters) > 0.5 * len(letters):
         return HEBREW_LETTER
     if sum(c.isupper() for c in letters) > 0.6 * len(letters):
-        return TIMES_CAP
-    return TIMES_X
+        return cap
+    return x
 
 
 def measured_em(item: Item, group: list[Line], ink, px: float) -> tuple[float, int] | None:
@@ -1264,7 +1307,7 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
                 # printed width between the letters
                 letters = [c for c in label if c.isalpha()]
                 caps = sum(c.isupper() for c in letters) >= 0.5 * max(len(letters), 1)
-                em = first.glyph * px / (TIMES_CAP if caps else TIMES_X)
+                em = first.glyph * px / (TYPEFACE.get("cap", TIMES_CAP) if caps else TYPEFACE.get("x", TIMES_X))
                 natural = face.text_length(label, em)
                 if natural < w:
                     size, spacing = em, (w - natural) / em / len(label)
@@ -1465,7 +1508,12 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
         members = [b for b in text_blocks if area_of[id(b)] == area and b.item.kind == "paragraph"]
         steps = sorted(st for b in members for st in b.steps)
         if area == ("text", False):
-            by_wrap = wrap_size(members, 1.04 * glyph_size[area], steps[len(steps) // 2] if steps else 0.0)
+            # (no larger than its glyphs and a pixel; in the book's own font, than its rows are
+            # apart: that font's em is the body the type was cast on, its line pitch)
+            cap = 1.04 * glyph_size[area]
+            if TYPEFACE and len(steps) >= 3:
+                cap = min(cap, steps[len(steps) // 2])
+            by_wrap = wrap_size(members, cap, steps[len(steps) // 2] if steps else 0.0)
         elif area == ("footnotes", False):  # in its printed rows (they run on to the page's end)
             by_wrap = wrap_size(members, glyph_size[area], 0.0, least=1)
         else:
@@ -1479,7 +1527,7 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
     for area in area_size:
         rows = sorted(st for b in text_blocks if area_of[id(b)] == area and b.pitch for st in b.steps)
         if len(rows) >= 3:
-            area_size[area] = min(area_size[area], 1.02 * rows[len(rows) // 2])
+            area_size[area] = min(area_size[area], (1.0 if TYPEFACE else 1.02) * rows[len(rows) // 2])
     levels = size_levels([(size, sum(w for _, w in measures[area])) for area, size in area_size.items()], tol=0.06)
     own_size = set()
     for b in text_blocks:
@@ -1516,7 +1564,7 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
             area_steps.setdefault(area_of[id(b)], []).extend(b.steps)
     for b in text_blocks:
         steps = sorted(area_steps.get(area_of[id(b)], []))
-        if not b.pitch or id(b) in own_size:
+        if not b.pitch:
             continue
         if len(steps) < 3:
             # one or two steps between rows say nothing (two rows of footnotes 50 pt apart for
@@ -1524,7 +1572,18 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
             b.pitch = 0.0
             continue
         area_pitch = steps[len(steps) // 2]
-        if len(b.steps) >= 4 and abs(b.pitch / area_pitch - 1) > 0.09:
+        # its own: from its first row to its last, over its steps (a row Vision boxed high, 28 pt
+        # from the one above and 54 from the one below, made the median 51 for rows 41 pt apart,
+        # p. 30), or over as many of the area's as that is (a row Vision did not read)
+        span = sum(b.steps)
+        own = span / max(len(b.steps), round(span / area_pitch)) if b.steps else b.pitch
+        if id(b) in own_size:
+            # a size of its own (or a measure of its glyphs off by its capitals): its own rows
+            b.pitch = own if b.steps else area_pitch * b.size / area_size.get(area_of[id(b)], b.size)
+            continue
+        # (its own, when it has rows enough and is set wider or closer)
+        if len(b.steps) >= 4 and abs(own / area_pitch - 1) > 0.09:
+            b.pitch = own
             continue
         b.pitch = area_pitch
     for b in blocks:
@@ -1551,9 +1610,9 @@ def blocks_html(blocks: list[Block], width_pt: float, height_pt: float, lang: st
 <style>
   * {{ margin: 0; padding: 0; box-sizing: border-box; }}
   .page {{ position: relative; width: {width_pt:.2f}pt; height: {height_pt:.2f}pt; overflow: hidden; }}
-  .region {{ position: absolute; color: #000; font-family: {FONT_FAMILY}; hyphens: auto; }}
+  .region {{ position: absolute; color: #000; font-family: {font_family()}; hyphens: auto; }}
   .region p {{ margin: 0; }}
-  .region .up {{ font-style: normal; }}
+  .region .up {{ font-style: normal;{f" font-family: {font_family()};" if TYPEFACE else ""} }}{italic_css()}
   .pic {{ position: absolute; }}
 </style>
 </head>
@@ -1564,6 +1623,13 @@ def blocks_html(blocks: list[Block], width_pt: float, height_pt: float, lang: st
 </body>
 </html>
 """
+
+
+def italic_css() -> str:
+    """With the book's fonts: <i> in its italic font (not slanted again)."""
+    if not TYPEFACE:
+        return ""
+    return f"\n  .region i {{ font-family: {font_family(True)}; font-style: normal; }}"
 
 
 def _split_text(text: str, k: int, group: list[Line]) -> tuple[str, str]:
@@ -1686,7 +1752,8 @@ def _block(item: Item, x: float, y: float, w: float, size: float, line_h: float,
            letter_spacing: float = 0.0, invisible: bool = False) -> str:
     style = _pos(x, y, w, height_pt, width_pt) + f" font-size: {size:.2f}pt; line-height: {line_h:.2f}pt; text-align: {align};"
     if item.italic:
-        style += " font-style: italic;"
+        # (the book's italic is a font of its own: not slanted again)
+        style += f" font-family: {font_family(True)};" if TYPEFACE else " font-style: italic;"
     if nowrap:
         style += " white-space: nowrap;"
     if letter_spacing:
@@ -1695,6 +1762,8 @@ def _block(item: Item, x: float, y: float, w: float, size: float, line_h: float,
         style += " color: rgba(0, 0, 0, 0);"
     p_style = f' style="text-indent: {indent:.1f}pt;"' if indent else ""
     attrs = f'data-zone="{item.zone}" data-role="{item.kind}"' + (f' data-lines="{" ".join(item.lines)}"' if item.lines else "")
+    if item.italic and TYPEFACE:
+        attrs += ' data-italic="1"'  # (html2pdf's long-s repair reads italic words apart)
     return f'<div class="region" {attrs} style="{style}"><p{p_style}>{marked_html(item.text, item.italic)}</p></div>'
 
 
@@ -1726,7 +1795,7 @@ def fit_round(target: Path, page_blocks: dict[int, list[Block]], pages_meta: lis
     positions (html2pdf --layout-report) say by how much.
     """
     report_path = work / "layout-report.json"
-    subprocess.run([str(HTML2PDF), str(target), "-o", str(work / "fit.pdf"), "--layout-report", str(report_path)],
+    subprocess.run([str(HTML2PDF), str(target), "-o", str(work / "fit.pdf"), "--layout-report", str(report_path), *html2pdf_fonts()],
                    check=True, capture_output=True)
     reports = {r["page"]: r for r in json.loads(report_path.read_text())}
     shrunk: dict[int, int] = {}  # page number: blocks set smaller
@@ -1942,9 +2011,11 @@ def scan_only_page(pdf_path: Path, n: int, out: Path) -> dict:
 def reconstruct(pdf_path: Path, out: Path, pages: list[int], lang: tuple[str, ...], html_lang: str,
                 semantic_context: str = "", llm: bool = True, model: str = "sonnet", agents: int = 4,
                 fit_rounds: int = 10, zoom: bool = False, guide: str = "", thinking: bool = True,
-                workers: int = 4, redo: set[int] | None = None, fresh_layout: bool = False) -> Path:
+                workers: int = 4, redo: set[int] | None = None, fresh_layout: bool = False,
+                typeface: Path | None = None) -> Path:
     from concurrent.futures import ProcessPoolExecutor, as_completed
 
+    use_typeface(typeface)
     work = out / "work"
     work.mkdir(parents=True, exist_ok=True)
     results: dict[int, dict] = {}
@@ -1992,7 +2063,7 @@ def reconstruct(pdf_path: Path, out: Path, pages: list[int], lang: tuple[str, ..
 
     import inspect
 
-    fit_code = inspect.getsource(globals()["fit_round"]) + inspect.getsource(_follow_size)  # sizes found by other code are no use
+    fit_code = inspect.getsource(globals()["fit_round"]) + inspect.getsource(_follow_size) + TYPEFACE.get("key", "")  # sizes found by other code (or fonts) are no use
     start_html = {}
     todo = []  # the pages to (re)write and fit: those not fitted before, then those set smaller
     for p in pages_meta:
@@ -2029,7 +2100,7 @@ def reconstruct(pdf_path: Path, out: Path, pages: list[int], lang: tuple[str, ..
     log.info(f"Wrote {target} ({len(pages_meta)} pages) in {time.perf_counter() - start:.0f}s")
     if HTML2PDF.exists():
         pdf_out, report = out / f"{out.resolve().name}.pdf", out / "layout-report.json"
-        cmd = [str(HTML2PDF), str(target), "-o", str(pdf_out), "--layout-report", str(report)]
+        cmd = [str(HTML2PDF), str(target), "-o", str(pdf_out), "--layout-report", str(report), *html2pdf_fonts()]
         if html_lang.split("-")[0] == "en" and Path(WORD_LIST).exists():
             # f the model still read for a long s ("addrefs"), from the word list
             cmd += ["--long-s", "careful", "--dict", WORD_LIST]

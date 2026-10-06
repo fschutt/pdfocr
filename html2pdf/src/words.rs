@@ -97,7 +97,8 @@ pub fn rewrite_texts(html: &str, mut f: impl FnMut(&str) -> String) -> String {
 
 /// The page with every word of its text blocks (`<div class="region">`, as `pdf-ocr-bench
 /// reconstruct` writes them) replaced by `f(word, italic)`; markup and spacing are kept. A word
-/// is italic in an italic block (`font-style: italic`) or in `<i>`, upright in `<span class="up">`.
+/// is italic in an italic block (`font-style: italic`, or `data-italic` when it is set in an italic
+/// font) or in `<i>`, upright in `<span class="up">`.
 pub fn rewrite_region_texts(html: &str, mut f: impl FnMut(&str, bool) -> String) -> String {
     const OPEN: &str = "<div class=\"region\"";
     let mut out = String::with_capacity(html.len());
@@ -108,7 +109,9 @@ pub fn rewrite_region_texts(html: &str, mut f: impl FnMut(&str, bool) -> String)
         out.push_str(&html[pos..start]);
         // the text between the block's tags, word by word
         let mut rest = &html[start..end];
-        let block_italic = rest[..rest.find('>').unwrap_or(rest.len())].contains("font-style: italic");
+        // italic: slanted (`font-style`), or set in an italic font of its own (`data-italic`)
+        let open_tag = &rest[..rest.find('>').unwrap_or(rest.len())];
+        let block_italic = open_tag.contains("font-style: italic") || open_tag.contains("data-italic");
         let mut italic = block_italic;
         while let Some(gt) = rest.find('>') {
             let tag = &rest[..=gt];
@@ -280,6 +283,12 @@ mod tests {
             w.to_string()
         });
         assert_eq!(seen, ["a", "b/i", "c/i", "d", "e/i", "f", "g/i"]);
+        let mut seen = Vec::new();
+        rewrite_region_texts(r#"<div class="region" data-italic="1" style="font-family: 'Book Italic';"><p>h <span class="up">k</span></p></div>"#, |w, italic| {
+            seen.push(format!("{w}{}", if italic { "/i" } else { "" }));
+            w.to_string()
+        });
+        assert_eq!(seen, ["h/i", "k"]);
     }
 
     #[test]

@@ -302,6 +302,37 @@ sent; they get the heuristic structure until the next run. An answer that leaves
 15% of the page's text (the model stopped halfway) is asked for once more. A page is one request of about
 0.5 MB of images, sent twice (the answer, and the structured-output turn): about 1 MB.
 
+### The book's own typeface
+
+Times is not the face the book was printed in: at the same x-height it sets lines some 5% wider,
+so paragraphs break where the print does not. `pdf-ocr-bench typeface OUT` rebuilds the book's
+own fonts from the scans of a `reconstruct` run in OUT, and `reconstruct --typeface OUT/typeface`
+sets the text in them (Times stands in for what they lack: Hebrew, Greek):
+
+```sh
+pdf-ocr-bench typeface out --family Calmet
+# -> out/typeface/Calmet-Regular.ttf, Calmet-Italic.ttf, svg/ (each glyph), typeface.json
+pdf-ocr-bench reconstruct scan.pdf -o out ... --typeface out/typeface
+```
+
+1. Every page's glyphs (cached in `work/page_NNN/glyphs.json`): Vision's text detection boxes
+   each glyph (a ligature, ſt, ct, fi, as one); the words Vision read there are lined up with
+   the words the model read for them. The model writes s for a long s that Vision reads f, so
+   that tells ſ from f; its markup tells italic. A word whose letters cannot be matched to its
+   boxes one to one (with the ligatures, and joining a letter the scan broke in two) is left out.
+2. Metrics, in the page's line pitch (the book is set solid: its em is the body the type was
+   cast on): each glyph's ink width, its side bearings from the gaps between the letters of
+   words (least squares; the spaced-out headwords left out), pair kerns, and the word space
+   (the tight end of the justified lines' spaces: a layout engine fills a line at the font's
+   space and only widens it).
+3. Shapes: up to 200 prints of each glyph from all over the book, scaled to one size, laid on
+   the baseline and centred, aligned by phase correlation, and their median taken.
+4. The medians traced (corners on the curve, the rest quadratic B-splines) into a TrueType font
+   per style (fontTools), with the measured advances, `liga` (fi, fl, ff, ffi, ffl, ct) and `kern`.
+
+Vol. 1 of Calmet (1053 pages): 3.3 million glyphs in about 2 minutes (4 workers), 178 glyphs
+averaged in about 3 minutes.
+
 ## Correcting with an LLM
 
 `scripts/llm_correct.py` proofreads a result page by page with Claude (`claude -p`, so a Claude
