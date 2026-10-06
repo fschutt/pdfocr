@@ -2,8 +2,9 @@
 
 Converts a `pages.zip` produced by `pdf-ocr-bench run` into a small, searchable PDF using
 [printpdf](https://github.com/fschutt/printpdf)'s HTML renderer. Each `page_NNN.html` becomes one
-page with the OCR text in black at its original position. There are no images, only text and one
-subset font, so a page costs a few KB.
+page with the OCR text in black at its original position, and the pictures its HTML shows
+(`<img>`, PNG or JPEG from the zip). The text is set in one subset font, so a page of text costs
+a few KB; the pictures are dithered to black and white, see [Pictures](#pictures).
 
 ```sh
 cargo run --release -- results/tesseract/pages.zip -o final.pdf
@@ -17,6 +18,7 @@ cargo run --release -- results/tesseract/pages.zip -o final.pdf
 | `--layout positioned\|flow` | every word at its OCR position (default), or text blocks rebuilt into columns and paragraphs; see [Flow layout](#flow-layout) |
 | `--long-s keep\|s\|repair` | the long s (ſ) of old print: keep it (default), turn it into `s`, or also repair `f` read for it; see [Long s](#long-s) |
 | `--dict PATH` | word list for `--long-s repair` and for joining hyphenated words (default `/usr/share/dict/words`) |
+| `--grey-pictures` | keep the pictures' greys (default: dithered to black and white, one bit per pixel); see [Pictures](#pictures) |
 | `--html-out DIR` | also write the HTML each page is rendered from (open it in a browser) |
 | `-v, --verbose` | print printpdf warnings |
 
@@ -28,12 +30,26 @@ cargo run --release -- results/tesseract/pages.zip -o final.pdf
    the manifest, and one font pool shared by all pages. A page whose content overflows onto a
    second PDF page is an error.
 3. Merge the single-page documents with `PdfDocument::append_document` and save once.
+4. Encode the saved PDF's pictures again with `printpdf::optimize_images`; see
+   [Pictures](#pictures).
 
 The pages are set in Helvetica. printpdf embeds its own Helvetica, and the word sizes computed
 by pdf-ocr-bench use the same glyph widths, so words land on their OCR boxes. Characters outside
 Windows-1252 (Cyrillic, CJK, …) fall back to a system font that has them.
 
 Open a page in a browser and press `d` to outline the word boxes.
+
+## Pictures
+
+The books' pictures are black-and-white prints (copper-plate engravings, woodcuts, initials),
+scanned as eight-bit greyscale. After saving, `printpdf::optimize_images` decodes each picture of
+the PDF, dithers it to black and white (Floyd–Steinberg) and writes it with one bit per pixel,
+under the same object number, so pages, fonts and text stay byte for byte as they were. A picture
+that would not come out smaller is kept as it is. For the 1053-page Calmet volume 1 this takes
+the 55 engravings from 11.3 MB to 5.6 MB and the PDF from 24.4 MB to 18.7 MB, in about 6 s.
+
+`--grey-pictures` keeps the greys (for photographs): the pictures are then only compressed again,
+without loss.
 
 ## Long s
 

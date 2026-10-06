@@ -882,7 +882,7 @@ checksum = "439ee305def115ba05938db6eb1644ff94165c5ab5e9420d1c1bcedbba909391"
 [[package]]
 name = "printpdf"
 version = "0.12.8"
-source = "git+https://github.com/fschutt/printpdf?branch=fix%2Fhtml-images-decoded-per-page#f5e7444caffa919e81920ead16c50d89d663927a"
+source = "git+https://github.com/fschutt/printpdf?branch=perf%2Foptimize-images#ccae3f8a3c6abf9c6f7f3eb076654c9187553b1f"
 dependencies = [
  "allsorts-azul",
  "azul-core",

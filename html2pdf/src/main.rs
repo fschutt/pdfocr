@@ -12,7 +12,10 @@ use std::time::Instant;
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use printpdf::html::{build_font_pool, SharedFontPool};
-use printpdf::{Base64OrRaw, GeneratePdfOptions, PdfDocument, PdfSaveOptions, PdfWarnMsg};
+use printpdf::{
+    optimize_images, Base64OrRaw, GeneratePdfOptions, ImageOptimizationOptions, PdfDocument, PdfSaveOptions,
+    PdfWarnMsg,
+};
 use serde::Deserialize;
 use zip::ZipArchive;
 
@@ -72,6 +75,11 @@ struct Args {
     /// problems that shows (text outside its box, off the page, blocks overlapping), as JSON
     #[arg(long, value_name = "FILE")]
     layout_report: Option<PathBuf>,
+
+    /// Keep the greys of the pictures (by default they are dithered to black and white, one bit
+    /// per pixel, which halves their size)
+    #[arg(long)]
+    grey_pictures: bool,
 
     /// Print printpdf warnings
     #[arg(short, long)]
@@ -200,9 +208,22 @@ fn main() -> Result<()> {
             totals.3
         );
     }
-    let bytes = doc.save(&PdfSaveOptions::default(), &mut warnings);
+    let saved = doc.save(&PdfSaveOptions::default(), &mut warnings);
+    let mut pictures = Vec::new();
+    let bytes = optimize_images(&saved, &picture_options(args.grey_pictures), &mut pictures)
+        .map_err(anyhow::Error::msg)
+        .context("encoding the pictures again")?;
     std::fs::write(&output, &bytes).with_context(|| format!("writing {}", output.display()))?;
     report_warnings(&warnings, args.verbose);
+    if !pictures.is_empty() {
+        println!(
+            "[html2pdf] Pictures: {} encoded again{}, {:.1} KiB -> {:.1} KiB",
+            pictures.len(),
+            if args.grey_pictures { "" } else { " in black and white" },
+            saved.len() as f32 / 1024.0,
+            bytes.len() as f32 / 1024.0
+        );
+    }
     if args.layout == Layout::Flow {
         let (regions, paragraphs, joined) = flow_stats;
         println!("[html2pdf] Flow layout: {regions} text blocks, {paragraphs} paragraphs, {joined} hyphenated words joined");
@@ -312,6 +333,17 @@ fn render_page(
     }
     Ok(doc) // more than one page: the caller sets the text smaller or keeps the first
 
+}
+
+/// How the saved PDF's pictures are encoded again. The scans are of black-and-white prints
+/// (engravings, woodcuts, initials): dithered (Floyd–Steinberg) to one bit per pixel they take
+/// half the bytes of eight-bit greyscale. Never scaled down.
+fn picture_options(keep_greys: bool) -> ImageOptimizationOptions {
+    ImageOptimizationOptions {
+        dither_greyscale: Some(!keep_greys),
+        max_image_size: None,
+        ..Default::default()
+    }
 }
 
 /// Every PNG/JPEG in the zip, keyed by its path there (what a page's `<img src>` names).
