@@ -669,6 +669,20 @@ def own_extent(text: str, group: list[Line]) -> Box | None:
     return out
 
 
+def row_extent(group: list[Line], lh: float) -> tuple[float, float, int]:
+    """Where `group`'s printed lines (their pieces joined) mostly start and its long ones end, and
+    how many printed lines it has."""
+    rows: list[list[float]] = []
+    for l in sorted(group, key=lambda l: l.box.y0):
+        if rows and l.box.y0 - rows[-1][2] <= 0.5 * lh:
+            rows[-1][0] = min(rows[-1][0], l.box.x0)
+            rows[-1][1] = max(rows[-1][1], l.box.x1)
+        else:
+            rows.append([l.box.x0, l.box.x1, l.box.y0])
+    x0s, x1s = sorted(r[0] for r in rows), sorted(r[1] for r in rows)
+    return x0s[round(0.2 * (len(x0s) - 1))], x1s[round(0.9 * (len(x1s) - 1))], len(rows)
+
+
 def _majority_zone(group: list[Line], default: str) -> str:
     """The zone most of the text of `group` stands in (by characters: a line Vision ran across a
     margin note is split into a long piece in the column and a short one in the note strip)."""
@@ -844,9 +858,13 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
     zones = {z.id: z for z in layout.zones}
     # footnotes the model put in a column (the layout may cut the footnote band into columns too):
     # text that starts below the bottom of the page's main columns
+    # (below every column set in the text's type: a column may run on in a short band below the
+    # tall ones; the footnote band, cut into columns too, is set smaller)
     main = [z for z in layout.zones if z.role == "column" and z.box.h >= 0.3 * layout.height]
+    body_glyph = sorted(z.glyph for z in main)[len(main) // 2] if main else 0.0
+    body = [z for z in layout.zones if z.role == "column" and z.glyph >= 0.9 * body_glyph]
     if main:
-        foot_top = max(z.box.y1 for z in main) - 0.3 * layout.line_height
+        foot_top = max(z.box.y1 for z in body) - 0.3 * layout.line_height
         for it in items:
             g = [by_id[i] for i in it.lines if i in by_id]
             if it.kind in ("paragraph", "note") and g and min(l.box.y0 for l in g) >= foot_top and "foot" not in it.label.lower():
@@ -896,6 +914,37 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
         margin_of[key] = (x0s[len(x0s) // 2], x1s[len(x1s) // 2])
     inner_notes = [(m[0], nt[1], m[1], nt[3], nt[4], nt[5]) if (m := margin_of.get((nt[4], nt[5]))) else nt
                    for nt in inner_notes]
+    # each column's text measure: where its paragraphs of three printed lines or more mostly start
+    # and end (their lines' pieces joined)
+    spans: dict[str, list[tuple[float, float]]] = {}
+    for it in items:
+        if it.kind != "paragraph" or "foot" in it.label.lower():
+            continue
+        whole = [by_id[i] for i in it.lines if i in by_id]
+        for part, g in (column_parts(it, whole, layout.line_height) if whole else []):
+            z = zones.get(part.zone)
+            if z is None or z.role not in ("column", "text") or not g:
+                continue
+            e0, e1, n_rows = row_extent(g, layout.line_height)
+            if n_rows >= 3 and len(plain(part.text)) <= 2 * sum(len(l.text) for l in g):
+                spans.setdefault(z.id, []).append((e0, e1))
+    measure_of: dict[str, tuple[float, float]] = {}
+    for zid, ss in spans.items():
+        e0 = sorted(a for a, _ in ss)[len(ss) // 2]
+        e1 = sorted(b for _, b in ss)[len(ss) // 2]
+        z = zones[zid]
+        if e1 - e0 > 0.5 * z.box.w:
+            measure_of[zid] = (e0, e1 + 0.01 * (e1 - e0))
+    # a zone without paragraphs to measure (a short band of a column): the measure of the same
+    # column in another band (a zone across most of its width)
+    for z in layout.zones:
+        if z.id in measure_of or z.role not in ("column", "text"):
+            continue
+        same = [m for zid, m in measure_of.items()
+                if min(m[1], z.box.x1) - max(m[0], z.box.x0) > 0.7 * min(m[1] - m[0], z.box.w)]
+        if len(same) == 1:
+            measure_of[z.id] = same[0]
+
     # notes not found on the page: in their column's margin (its outer side if it has none yet),
     # stacked where several stand beside one entry
     lh = layout.line_height
@@ -976,21 +1025,20 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
             # the measure of its own lines: where most start, where the long ones end
             # (the pieces of each printed line joined: the layout may cut a band into narrow zones,
             # and assign() splits a line by them)
-            row_boxes: list[list[float]] = []
-            for l in sorted(group, key=lambda l: l.box.y0):
-                if row_boxes and l.box.y0 - row_boxes[-1][2] <= 0.5 * layout.line_height:
-                    row_boxes[-1][0] = min(row_boxes[-1][0], l.box.x0)
-                    row_boxes[-1][1] = max(row_boxes[-1][1], l.box.x1)
-                else:
-                    row_boxes.append([l.box.x0, l.box.x1, l.box.y0])
-            x0s, x1s = sorted(r[0] for r in row_boxes), sorted(r[1] for r in row_boxes)
-            ex0, ex1 = x0s[round(0.2 * (len(x0s) - 1))], x1s[round(0.9 * (len(x1s) - 1))]
+            ex0, ex1, _ = row_extent(group, layout.line_height)
+            if zone.id in measure_of:
+                # the column's text measure, as its paragraphs are printed (its zone may take in a
+                # note margin, or the gutter)
+                left, right = measure_of[zone.id]
             # a measure from its lines needs two printed lines (one is often a fragment the OCR read
             # of a paragraph whose text the model read from the scan: a 57 px "in" on p. 995)
             one_line = len(rows) == 1 and zone.role in ("column", "text")
             # nor do lines that hold less than half its text (the model read the rest from the scan)
             read_elsewhere = len(plain(item.text)) > 2 * sum(len(l.text) for l in group) and zone.role in ("column", "text")
-            if not (one_line or read_elsewhere) and not (0.8 * (ex1 - ex0) <= right - left <= 1.6 * (ex1 - ex0)):
+            # nor, in a column whose measure is known, lines wider than it (pieces of the next
+            # column's line Vision ran into it: p. 165)
+            too_wide = zone.id in measure_of and ex1 - ex0 > right - left
+            if not (one_line or read_elsewhere or too_wide) and not (0.8 * (ex1 - ex0) <= right - left <= 1.6 * (ex1 - ex0)):
                 # a zone that is no column of it: a speck labelled footnotes, footnotes set in
                 # three columns inside a wide zone, a zone narrower than the text
                 # (a verse centred in its column keeps the column's measure)
