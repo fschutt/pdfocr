@@ -12,10 +12,7 @@ use std::time::Instant;
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use printpdf::html::{build_font_pool, SharedFontPool};
-use printpdf::{
-    optimize_images, Base64OrRaw, GeneratePdfOptions, ImageOptimizationOptions, PdfDocument, PdfSaveOptions,
-    PdfWarnMsg,
-};
+use printpdf::{Base64OrRaw, GeneratePdfOptions, ImageOptimizationOptions, PdfDocument, PdfSaveOptions, PdfWarnMsg};
 use serde::Deserialize;
 use zip::ZipArchive;
 
@@ -208,22 +205,11 @@ fn main() -> Result<()> {
             totals.3
         );
     }
-    let saved = doc.save(&PdfSaveOptions::default(), &mut warnings);
-    let mut pictures = Vec::new();
-    let bytes = optimize_images(&saved, &picture_options(args.grey_pictures), &mut pictures)
-        .map_err(anyhow::Error::msg)
-        .context("encoding the pictures again")?;
+    // (saving also drops the /ActualText of every line whose glyphs read as that text anyway)
+    let options = PdfSaveOptions { image_optimization: Some(picture_options(args.grey_pictures)), ..Default::default() };
+    let bytes = doc.save(&options, &mut warnings);
     std::fs::write(&output, &bytes).with_context(|| format!("writing {}", output.display()))?;
     report_warnings(&warnings, args.verbose);
-    if !pictures.is_empty() {
-        println!(
-            "[html2pdf] Pictures: {} encoded again{}, {:.1} KiB -> {:.1} KiB",
-            pictures.len(),
-            if args.grey_pictures { "" } else { " in black and white" },
-            saved.len() as f32 / 1024.0,
-            bytes.len() as f32 / 1024.0
-        );
-    }
     if args.layout == Layout::Flow {
         let (regions, paragraphs, joined) = flow_stats;
         println!("[html2pdf] Flow layout: {regions} text blocks, {paragraphs} paragraphs, {joined} hyphenated words joined");
@@ -335,15 +321,11 @@ fn render_page(
 
 }
 
-/// How the saved PDF's pictures are encoded again. The scans are of black-and-white prints
-/// (engravings, woodcuts, initials): dithered (Floyd–Steinberg) to one bit per pixel they take
-/// half the bytes of eight-bit greyscale. Never scaled down.
+/// How the pictures are saved: scaled down to printpdf's default 2 MB of pixels, and as the
+/// scans are of black-and-white prints (engravings, woodcuts, initials), dithered
+/// (Floyd–Steinberg) to one bit per pixel, which takes half the bytes of eight-bit greyscale.
 fn picture_options(keep_greys: bool) -> ImageOptimizationOptions {
-    ImageOptimizationOptions {
-        dither_greyscale: Some(!keep_greys),
-        max_image_size: None,
-        ..Default::default()
-    }
+    ImageOptimizationOptions { dither_greyscale: Some(!keep_greys), ..Default::default() }
 }
 
 /// Every PNG/JPEG in the zip, keyed by its path there (what a page's `<img src>` names).

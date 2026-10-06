@@ -29,9 +29,11 @@ cargo run --release -- results/tesseract/pages.zip -o final.pdf
 2. Render each page with `PdfDocument::from_html_with_cache`, using zero margins, the page size from
    the manifest, and one font pool shared by all pages. A page whose content overflows onto a
    second PDF page is an error.
-3. Merge the single-page documents with `PdfDocument::append_document` and save once.
-4. Encode the saved PDF's pictures again with `printpdf::optimize_images`; see
-   [Pictures](#pictures).
+3. Merge the single-page documents with `PdfDocument::append_document` and save once, with the
+   pictures dithered to black and white ([Pictures](#pictures)). Saving also drops the
+   `/ActualText` that printpdf wraps around each line wherever the line's glyphs read as the same
+   text anyway (through the fonts' `/ToUnicode`, with no letter-spacing a reader would take for
+   spaces): copy-paste and search get the same words, and letter-spaced headings keep theirs.
 
 The pages are set in Helvetica. printpdf embeds its own Helvetica, and the word sizes computed
 by pdf-ocr-bench use the same glyph widths, so words land on their OCR boxes. Characters outside
@@ -42,14 +44,15 @@ Open a page in a browser and press `d` to outline the word boxes.
 ## Pictures
 
 The books' pictures are black-and-white prints (copper-plate engravings, woodcuts, initials),
-scanned as eight-bit greyscale. After saving, `printpdf::optimize_images` decodes each picture of
-the PDF, dithers it to black and white (Floyd–Steinberg) and writes it with one bit per pixel,
-under the same object number, so pages, fonts and text stay byte for byte as they were. A picture
-that would not come out smaller is kept as it is. For the 1053-page Calmet volume 1 this takes
-the 55 engravings from 11.3 MB to 5.6 MB and the PDF from 24.4 MB to 18.7 MB, in about 6 s.
+scanned as eight-bit greyscale. printpdf saves them scaled down to its default 2 MB of pixels and
+dithered to black and white (Floyd–Steinberg), with one bit per pixel. For the 1053-page Calmet
+volume 1 that takes the 55 engravings from 11.3 MB to 5.6 MB; with the `/ActualText` dropped too
+(12.5 MB of page content becomes 8.5 MB), the PDF is 14.5 MB instead of 24.4 MB.
 
-`--grey-pictures` keeps the greys (for photographs): the pictures are then only compressed again,
-without loss.
+`--grey-pictures` keeps the greys (for photographs).
+
+The same two passes shrink a PDF made elsewhere: `printpdf::optimize_images` and
+`printpdf::optimize_text` (printpdf's `examples/optimize_pdf.rs` runs both).
 
 ## Long s
 
