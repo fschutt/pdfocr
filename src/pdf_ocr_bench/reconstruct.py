@@ -1054,6 +1054,14 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
                 same = [nt for nt in inner_notes if zone.box.x0 - layout.line_height <= (nt[0] + nt[2]) / 2 <= zone.box.x1]
                 if same:
                     gx0, _, gx1, _ = min(same, key=lambda nt: abs(nt[1] - first.box.y0))[:4]
+            # never into a column's text: a note beside a column ends before (starts after) it
+            lh_ = layout.line_height
+            for m0, m1 in columns_measured:
+                centre = (gx0 + gx1) / 2
+                if m0 - 12 * lh_ < centre < m0 and gx1 > m0 - 0.3 * lh_ and m0 - 0.3 * lh_ - gx0 >= 2 * lh_:
+                    gx1 = m0 - 0.3 * lh_
+                elif m1 < centre < m1 + 12 * lh_ and gx0 < m1 + 0.3 * lh_ and gx1 - (m1 + 0.3 * lh_) >= 2 * lh_:
+                    gx0 = m1 + 0.3 * lh_
             x0, w = gx0 * px, (gx1 - gx0) * px
         else:
             left, right = zone.box.x0, zone.box.x1
@@ -1099,6 +1107,14 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
             if right - left < 0.5 * zone.box.w and right - left < 0.5 * (ex1 - ex0):
                 # not a margin: the notes took most of it (a column: its own measure)
                 left, right = (zone.box.x0, zone.box.x1) if zone.role in ("column", "text") else (ex0, ex0 + 1.02 * (ex1 - ex0))
+            if item.kind == "note":  # a note strip's note: not into the column's text either
+                lh_ = layout.line_height
+                for m0, m1 in columns_measured:
+                    centre = (left + right) / 2
+                    if m0 - 12 * lh_ < centre < m0 and right > m0 - 0.3 * lh_ and m0 - 0.3 * lh_ - left >= 2 * lh_:
+                        right = m0 - 0.3 * lh_
+                    elif m1 < centre < m1 + 12 * lh_ and left < m1 + 0.3 * lh_ and right - (m1 + 0.3 * lh_) >= 2 * lh_:
+                        left = m1 + 0.3 * lh_
             x0, w = left * px, (right - left) * px
         text = item.text
         font = _times(item.italic)

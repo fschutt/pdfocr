@@ -244,6 +244,11 @@ def _split(text: np.ndarray, words: np.ndarray, box: Box, lh: float, out: list[t
     free = occupancy <= max(2.0, 0.1 * dense) if tall else occupancy == 0
     min_gutter = max(3, int((0.12 if tall else 1.5) * lh))
     gutters = [(a, b) for a, b in _runs(free, 0) if b - a >= min_gutter and a > 0 and b < box.w]
+    if not gutters and tall and box.w >= 0.6 * text.shape[1]:
+        # a page of two columns over many lines of footnotes across the page: more than a tenth
+        # of the lines cross its gutter (a fifth do not, in a column of text)
+        free = occupancy <= max(2.0, 0.2 * dense)
+        gutters = [(a, b) for a, b in _runs(free, 0) if b - a >= 2 * min_gutter and a > 0.25 * box.w and b < 0.75 * box.w]
     if not gutters or depth > 12:
         out.append((box, "block"))
         return
@@ -308,7 +313,31 @@ def _split(text: np.ndarray, words: np.ndarray, box: Box, lh: float, out: list[t
     for a, b in bands:
         piece = _tight(text, Box(box.x0 + a, box.y0, box.x0 + b, box.y1))
         if piece.w > 0:
-            out.append((piece, "columns"))
+            # a "column" as wide as most of the page: two columns, when footnotes across the page
+            # cross their gutter (p. 880 of vol. 1)
+            out.extend((p, "columns") for p in _two_columns(text, words, piece, lh) or [piece])
+
+
+def _two_columns(text: np.ndarray, words: np.ndarray, box: Box, lh: float) -> list[Box] | None:
+    """`box` cut at a gutter in its middle half that at most a fifth of its lines cross, if it is
+    a tall piece across most of the page; else None."""
+    if box.w < 0.6 * text.shape[1] or box.h < 8 * lh:
+        return None
+    cx, cy = (words[:, 0] + words[:, 2]) / 2, (words[:, 1] + words[:, 3]) / 2
+    mine = words[(cx >= box.x0) & (cx < box.x1) & (cy >= box.y0) & (cy < box.y1)]
+    diff = np.zeros(box.w + 1, dtype=np.int32)
+    np.add.at(diff, np.clip(mine[:, 0] - box.x0, 0, box.w), 1)
+    np.add.at(diff, np.clip(mine[:, 2] - box.x0, 0, box.w), -1)
+    occupancy = np.cumsum(diff)[:box.w]
+    dense = float(np.percentile(occupancy, 75)) if len(occupancy) else 0.0
+    free = occupancy <= max(2.0, 0.2 * dense)
+    gutters = [(a, b) for a, b in _runs(free, 0) if b - a >= max(6, int(0.24 * lh)) and a > 0.25 * box.w and b < 0.75 * box.w]
+    if not gutters:
+        return None
+    a, b = max(gutters, key=lambda g: g[1] - g[0])
+    left = _tight(text, Box(box.x0, box.y0, box.x0 + a, box.y1))
+    right = _tight(text, Box(box.x0 + b, box.y0, box.x1, box.y1))
+    return [left, right] if left.w > 0 and right.w > 0 else None
 
 
 def _line_start(region: np.ndarray, y: int, lh: float) -> int:
