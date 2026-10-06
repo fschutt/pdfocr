@@ -30,7 +30,7 @@ LIGATURES = ("ſſi", "ſſl", "ffi", "ffl", "ſſ", "ſt", "ſi", "ſl", "ſh",
 # letters that stand on the baseline (no descender): what a word's baseline is measured on
 ON_BASELINE = set("acehiklmnorstuvwxzABCDEFGHIKLMNORSTUVWXZ")
 X_HEIGHT = set("acemnorsuvwxz")
-SCAN_VERSION = 2  # glyphs.json of another version is scanned again
+SCAN_VERSION = 3  # glyphs.json of another version is scanned again
 
 
 def glyph_boxes(image: Path) -> list[tuple[int, int, int, int, int]]:
@@ -740,7 +740,8 @@ def build_font(style: str, shapes_: dict, metrics_: dict, family: str, path: Pat
     fb.setupPost(italicAngle=-14 if style == "italic" else 0)
     fb.setupHead(macStyle=0x02 if style == "italic" else 0)
     # the ligatures the compositor set (where the text has their letters), and the kerns
-    ligs = [c for c in sources if len(c) > 1 and all(ch in sources for ch in c) and "ſ" not in c]
+    # (only the compositor's: a pair Vision boxed as one where its letters touch is no ligature)
+    ligs = [c for c in sources if c in LIGATURES and all(ch in sources for ch in c) and "ſ" not in c]
     fea = []
     if ligs:
         fea.append("feature liga {\n" + "".join(
