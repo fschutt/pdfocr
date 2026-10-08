@@ -127,12 +127,51 @@ def to_items(answer: dict, lines: list, layout: PageLayout):
         items.append(Item(zone=zone, text=text, lines=ids, kind=a.get("kind", "paragraph"),
                           drop_cap=(a.get("drop_cap") or "")[:1], align=a.get("align") or "justify",
                           italic=bool(a.get("italic")), label=str(a.get("zone") or "")))
+    _trim_repeated(items, known)
     # lines the answer left out: fine when they are a little junk, not when text went missing
     missing = sum(len(l.text) for i, l in known.items() if i not in used)
     total = sum(len(l.text) for l in lines) or 1
     if missing > 0.15 * total:
         return None
     return items
+
+
+def _trim_repeated(items: list, known: dict) -> None:
+    """An item whose text runs on past what its lines read, into the text of another item (the
+    model gave a paragraph's lines in one column its whole text, and its lines in the next
+    column, with that text again, an item of their own: 91 words drawn where 5 lines were
+    printed, p. 455): its text ends where that other item's begins."""
+    import difflib
+
+    from .reconstruct import _norm_word, _split_at, plain
+
+    # (paragraphs, and eight words alike: the chronological notes all begin "In the Year of the
+    # World", and one was cut to nothing)
+    starts = []
+    for item in items:
+        head = [k for k in (_norm_word(w) for w in plain(item.text).split()) if k][:8]
+        if item.kind == "paragraph" and len(head) == 8:
+            starts.append((item, head))
+    for item in items:
+        if not item.lines or item.kind != "paragraph":
+            continue
+        words = item.text.split()
+        keys = [_norm_word(plain(w)) for w in words]
+        read = [k for i in item.lines if i in known for k in (_norm_word(w) for w in known[i].text.split()) if k]
+        match = difflib.SequenceMatcher(None, read, keys, autojunk=False)
+        end = max((b + n for _, b, n in match.get_matching_blocks() if n), default=0)
+        if end < 3 or end > len(words) - 8:
+            continue  # its lines read none of it, or it to (nearly) its end
+        for other, head in starts:
+            if other is item:
+                continue
+            for t in range(end, len(keys) - 7):
+                if keys[t:t + 8] == head:
+                    item.text = _split_at(item.text, t)[0]
+                    break
+            else:
+                continue
+            break
 
 
 def _pairs(text: str) -> set[tuple[str, str]]:

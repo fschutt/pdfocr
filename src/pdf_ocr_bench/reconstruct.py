@@ -481,6 +481,7 @@ class Block:
     letter_spacing: float = 0.0  # em
     pitch: float = 0.0  # the scan's line pitch, pt: the line height whenever the text is smaller
     measure: str = ""  # what measured its size: "line width" (its area's printed lines), else its glyphs
+    lead: int = 0  # a note: the words of its text before the first line the OCR read of it
     steps: tuple = ()  # the steps from one of its printed rows to the next, pt (what measured `pitch`)
 
 
@@ -501,10 +502,16 @@ def column_parts(item: Item, group: list[Line], lh: float) -> list[tuple[Item, l
     chars = [sum(len(l.text) for l in run) for run in runs]
     words, out, taken = item.text.split(), [], 0
     rest = item.text
+    ends = _run_ends(runs, words)
     for k, run in enumerate(runs):
         last = k == len(runs) - 1
         n = len(words) - taken if last else round(len(words) * sum(chars[:k + 1]) / max(sum(chars), 1)) - taken
-        if not last:
+        if not last and ends[k] is not None:
+            # where the words read in this column end in the text: all of the item's OCR words
+            # lined up with its text (by the characters a part took 9 lines more than its 4,
+            # its text's continuation not all among the item's lines, p. 455)
+            n = ends[k] - taken
+        elif not last:
             # at the word the OCR read last in the column, when it is near (the characters are a
             # word or so off: "reigned fifty" for the printed "reigned", p. 126)
             row = [l for l in run if l.box.y0 > max(m.box.y0 for m in run) - 0.5 * lh]
@@ -515,6 +522,58 @@ def column_parts(item: Item, group: list[Line], lh: float) -> list[tuple[Item, l
             out.append((replace(item, text=piece, lines=[l.id for l in run], zone=_majority_zone(run, item.zone),
                                 drop_cap=item.drop_cap if k == 0 else ""), run))
     return out or [(item, group)]
+
+
+def _run_ends(runs: list[list[Line]], words: list[str]) -> list[int | None]:
+    """For each run of a paragraph's lines (a column's), the number of `words` (its text's) up to
+    the last one lined up with a word read in that run; None for a run none of whose words is."""
+    import difflib
+
+    ocr, owner = [], []
+    for k, run in enumerate(runs):
+        rows: list[list[Line]] = []  # (its lines top to bottom, the pieces of each left to right)
+        for line in sorted(run, key=lambda l: l.box.y0):
+            if rows and line.box.y0 - rows[-1][0].box.y0 < 0.5 * max(rows[-1][0].box.h, 1):
+                rows[-1].append(line)
+            else:
+                rows.append([line])
+        for line in [l for row in rows for l in sorted(row, key=lambda l: l.box.x0)]:
+            for w in line.text.split():
+                key = _norm_word(w)
+                if key:
+                    ocr.append(key)
+                    owner.append(k)
+    keys = [_norm_word(plain(w)) for w in words]
+    match = difflib.SequenceMatcher(None, ocr, keys, autojunk=False)
+    ends: list[int | None] = [None] * len(runs)
+    for a, b, size in match.get_matching_blocks():
+        for j in range(size):
+            k = owner[a + j]
+            ends[k] = max(ends[k] or 0, b + j + 1)
+    # (in order: a later run's end never before an earlier one's)
+    for k in range(1, len(ends)):
+        if ends[k] is not None and ends[k - 1] is not None and ends[k] < ends[k - 1]:
+            ends[k] = None
+    return ends
+
+
+def _lead_words(text: str, top: Line) -> int:
+    """How many words of `text` come before the first one the OCR line `top` read: where the
+    most of its words follow one another in the text (its first word may be the end of one the
+    print divided: "fore the" of "be-fore the"); 0 if fewer than two of them do."""
+    words = [_norm_word(plain(w)) for w in text.split()]
+    read = [k for k in (_norm_word(w) for w in top.text.split()) if k]
+    if not read:
+        return 0
+    best, at = 0, 0
+    for j in range(len(words)):
+        n = 0
+        while n < len(read) and j + n < len(words) and (
+                words[j + n] == read[n] or (n == 0 and len(read[0]) >= 3 and words[j].endswith(read[0]))):
+            n += 1
+        if n > best:
+            best, at = n, j
+    return at if best >= min(2, len(read)) else 0
 
 
 def _split_near(words: list[str], n: int, last: str) -> int:
@@ -872,6 +931,18 @@ def text_edges(ink, e0: float, e1: float, y0: float, y1: float, lh: float, rows:
     return new0, new1
 
 
+def _row_ends(group: list[Line], lh: float) -> tuple[float, float]:
+    """Where `group`'s printed lines (their pieces joined) start and end, the middle ones."""
+    rows: list[list[float]] = []
+    for l in sorted(group, key=lambda l: l.box.y0):
+        if rows and l.box.y0 - rows[-1][2] <= 0.5 * lh:
+            rows[-1][0], rows[-1][1] = min(rows[-1][0], l.box.x0), max(rows[-1][1], l.box.x1)
+        else:
+            rows.append([l.box.x0, l.box.x1, l.box.y0])
+    x0s, x1s = sorted(r[0] for r in rows), sorted(r[1] for r in rows)
+    return x0s[len(x0s) // 2], x1s[len(x1s) // 2]
+
+
 def _majority_zone(group: list[Line], default: str) -> str:
     """The zone most of the text of `group` stands in (by characters: a line Vision ran across a
     margin note is split into a long piece in the column and a short one in the note strip)."""
@@ -1144,13 +1215,6 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
         x0s, x1s = sorted(nt[0] for nt in mine), sorted(nt[2] for nt in mine)
         margin_of[key] = (x0s[len(x0s) // 2], x1s[len(x1s) // 2])
         note_margin[key] = (x0s[len(x0s) // 2], x1s[-1])
-    # the notes a paragraph keeps clear of: those the OCR read there, and those in a margin (one
-    # placed by its words only where the paragraph's other lines stand clear of it: a "Luke" of
-    # the text set the paragraph 267 pt narrower, in 37 lines for 22, p. 605)
-    keep_clear = [(m[0], nt[1], m[1], nt[3], nt[4], nt[5]) if (m := margin_of.get((nt[4], nt[5]))) else nt
-                  for nt in inner_notes if nt in seen_notes or (nt[4], nt[5]) in margin_of]
-    inner_notes = [(m[0], nt[1], m[1], nt[3], nt[4], nt[5]) if (m := margin_of.get((nt[4], nt[5]))) else nt
-                   for nt in inner_notes]
     # the page's columns as printed: the spans (where most lines start and end) of its paragraphs of
     # three printed lines or more, grouped where they overlap; each column's measure is the median
     # of its spans. Zones do not say it: the layout may cut a column in two, leave two columns one
@@ -1189,6 +1253,21 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
             return None
         return best[0], best[1] + 0.01 * (best[1] - best[0])
 
+    # a margin is beside the text, not over it: one the notes taken for it put into a column's
+    # text (a note in the gutter: column 1's "left margin" over column 0's line ends, p. 120; a
+    # note's extent that took in a word of the text, 130 pt into its own column, p. 37) is none
+    for key, (mx0, mx1) in list(margin_of.items()):
+        if any(min(mx1, m1) - max(mx0, m0) > layout.line_height for m0, m1 in columns_measured):
+            del margin_of[key]
+            note_margin.pop(key, None)
+    # the notes a paragraph keeps clear of: those the OCR read there, and those in a margin (one
+    # placed by its words only where the paragraph's other lines stand clear of it: a "Luke" of
+    # the text set the paragraph 267 pt narrower, in 37 lines for 22, p. 605)
+    keep_clear = [(m[0], nt[1], m[1], nt[3], nt[4], nt[5]) if (m := margin_of.get((nt[4], nt[5]))) else nt
+                  for nt in inner_notes if nt in seen_notes or (nt[4], nt[5]) in margin_of]
+    inner_notes = [(m[0], nt[1], m[1], nt[3], nt[4], nt[5]) if (m := margin_of.get((nt[4], nt[5]))) else nt
+                   for nt in inner_notes]
+
     def into_margin(left: float, right: float, top: float, bottom: float) -> tuple[float, float]:
         """A margin note's room: the margin beside the nearest column, from the outer edge of the
         notes and note strips there to just before the column's text (never into it). Vision
@@ -1202,6 +1281,11 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
         centre = (left + right) / 2
         beside = [(m0 - centre, "left", m0) for m0, _ in columns if m0 - reach < centre < m0] + \
                  [(centre - m1, "right", m1) for _, m1 in columns if m1 < centre < m1 + reach]
+        if not beside:
+            # one that starts in a margin and runs into the text (its extent took in a word of
+            # the text beside it, 130 pt over the paragraph, p. 37): that margin's
+            beside = [(0.0, "left", m0) for m0, m1 in columns if m0 - reach < left < m0 - lh_ and centre < (m0 + m1) / 2] + \
+                     [(0.0, "right", m1) for m0, m1 in columns if m1 + lh_ < right < m1 + reach and centre > (m0 + m1) / 2]
         if not beside:
             return left, right
         _, side, edge = min(beside)
@@ -1251,13 +1335,22 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
         z = zones.get(line.zone)
         if z is None or z.role not in ("column", "text"):
             continue
-        outside = "right" if z.box.x0 + z.box.w / 2 > layout.width / 2 else "left"
-        sides = [side for (zid, side) in margin_of if zid == z.id]
-        side = sides[0] if sides else outside
         cx = (line.box.x0 + line.box.x1) / 2
         near = [(e0, e1) for e0, e1, a, b in spans_at
                 if a - 3 * lh < line.box.y1 and line.box.y0 < b + 3 * lh and e0 < cx < e1]
         e0, e1 = near[0] if near else (line.box.x0, line.box.x1)
+        # (the outer side of its column's text as printed: its zone may take in more of the page)
+        outside = "right" if (e0 + e1) / 2 > layout.width / 2 else "left"
+        sides = [side for (zid, side) in margin_of if zid == z.id]
+        side = sides[0] if sides else outside
+
+        def white(side: str) -> tuple[float, float]:
+            # the white beside its text, off the next column's (p. 120: in the gutter, over it)
+            if side == "right":
+                outer = min([layout.width - 0.5 * lh, e1 + 6 * lh] + [m0 - 0.5 * lh for m0, _ in columns_measured if m0 >= e1 + lh])
+                return e1 + 0.5 * lh, outer
+            outer = max([0.5 * lh, e0 - 6 * lh] + [m1 + 0.5 * lh for _, m1 in columns_measured if m1 <= e0 - lh])
+            return outer, e0 - 0.5 * lh
 
         def room(side: str) -> tuple[float, float]:
             probe = (e1 + 0.6 * lh, e1 + 0.7 * lh) if side == "right" else (e0 - 0.7 * lh, e0 - 0.6 * lh)
@@ -1276,8 +1369,10 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
                 side = outside
                 mx0, mx1 = room(side)
             if mx1 - mx0 < 2 * lh:  # no ink beside it: the white beside the text all the same
-                mx0, mx1 = ((e1 + 0.5 * lh, min(layout.width - 0.5 * lh, e1 + 6 * lh)) if side == "right"
-                            else (max(0.5 * lh, e0 - 6 * lh), e0 - 0.5 * lh))
+                mx0, mx1 = white(side)
+                if mx1 - mx0 < 2 * lh:
+                    side = "left" if side == "right" else "right"
+                    mx0, mx1 = white(side)
         margin_of.setdefault((z.id, side), (mx0, mx1))
         note_margin.setdefault((z.id, side), (mx0, mx1))
         y0, gap = line.box.y0, int(0.3 * lh) + 1
@@ -1299,6 +1394,7 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
         first = min(group, key=lambda l: (l.box.y0, l.box.x0)) if part_no else group[0]
         top = first.box.y0 * px
         size0 = em_of(group)
+        lead_words = _lead_words(item.text, min(group, key=lambda l: l.box.y0)) if item.kind == "note" and part_no == 0 else 0
         # the printed lines (Vision may read one in two pieces) and their pitch: the usual step
         # from one to the next, whatever order the lines were listed in
         rows: list[int] = []
@@ -1378,11 +1474,22 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
                 # (a verse centred in its column keeps the column's measure)
                 left, right = ex0, ex0 + 1.02 * (ex1 - ex0)
             gy0, gy1 = min(l.box.y0 for l in group), max(l.box.y1 for l in group)
-            # the column's note margins: kept free for all its text, as in print
+            # the column's note margins: kept free for all its text, as in print. (Not where most of
+            # its own lines are printed: a note's extent taken into the text set the margin 130 pt
+            # into the column, the paragraph beside it 25% narrower, p. 37. Its lines' middle start
+            # and end, not where the few that a note ran into start.)
+            row_x0, row_x1 = _row_ends(group, layout.line_height)
+            # (within the text's own edges and its column's measure: where notes Vision ran into half
+            # its lines end, p. 605)
+            row_x0, row_x1 = max(row_x0, ex0, left), min(row_x1, ex1, right)
             if (zone.id, "left") in margin_of:
-                left = max(left, margin_of[(zone.id, "left")][1] + 0.5 * layout.line_height)
+                m = margin_of[(zone.id, "left")][1] + 0.5 * layout.line_height
+                if row_x0 >= m - layout.line_height:
+                    left = max(left, m)
             if (zone.id, "right") in margin_of:
-                right = min(right, margin_of[(zone.id, "right")][0] - 0.5 * layout.line_height)
+                m = margin_of[(zone.id, "right")][0] - 0.5 * layout.line_height
+                if row_x1 <= m + layout.line_height:
+                    right = min(right, m)
             # note strips the layout found inside the column's width count as its margin too (not
             # those its own lines stand in: the layout may cut a band of text into narrow strips)
             own_zones = {l.zone for l in group}
@@ -1391,18 +1498,23 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
                 rest = [l for l in group if min(l.box.y1, nt[3]) <= max(l.box.y0, nt[1])]
                 if not rest:
                     return False
+                # (within the text's own edges, as above)
                 if (nt[0] + nt[2]) / 2 < (left + right) / 2:
-                    return sorted(l.box.x0 for l in rest)[len(rest) // 2] >= nt[2] - 0.5 * layout.line_height
-                return sorted(l.box.x1 for l in rest)[len(rest) // 2] <= nt[0] + 0.5 * layout.line_height
+                    return sorted(max(l.box.x0, ex0, left) for l in rest)[len(rest) // 2] >= nt[2] - 0.5 * layout.line_height
+                return sorted(min(l.box.x1, ex1, right) for l in rest)[len(rest) // 2] <= nt[0] + 0.5 * layout.line_height
 
             placed = [nt for nt in inner_notes if nt not in keep_clear and clear_of_text(nt)]
             for nx0, ny0, nx1, ny1, *_ in keep_clear + placed + strips:
                 if min(ny1, gy1) - max(ny0, gy0) < 0.5 * layout.line_height or nx1 < left or nx0 > right:
                     continue  # not beside this paragraph
+                # (and its lines mostly printed clear of it: a note's extent that took in a word of
+                # the text beside it reached 130 pt into it, p. 37)
                 if (nx0 + nx1) / 2 < left + 0.3 * (right - left):
-                    left = nx1 + 0.5 * layout.line_height
+                    if row_x0 >= nx1 - layout.line_height:
+                        left = nx1 + 0.5 * layout.line_height
                 elif (nx0 + nx1) / 2 > right - 0.3 * (right - left):
-                    right = nx0 - 0.5 * layout.line_height
+                    if row_x1 <= nx0 + layout.line_height:
+                        right = nx0 - 0.5 * layout.line_height
             if right - left < 0.5 * zone.box.w and right - left < 0.5 * (ex1 - ex0):
                 # not a margin: the notes took most of it (a column: its own measure)
                 left, right = (zone.box.x0, zone.box.x1) if zone.role in ("column", "text") else (ex0, ex0 + 1.02 * (ex1 - ex0))
@@ -1463,7 +1575,7 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
         if item.kind == "heading":
             align = item.align if item.align != "justify" else "left"
         block = Block(item, x0, top, w, size0, max(pitch, 1.0 * size0), align, indent=indent, pitch=pitch if n >= 2 else 0.0,
-                      steps=steps_pt)
+                      steps=steps_pt, lead=lead_words)
         block.fit = (n, size0, pitch)  # sized below, once the room down to the next block is known
         blocks.append(block)
 
@@ -1612,6 +1724,12 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
     for b in blocks:
         _follow_size(b)
         b.start_size = b.size
+        if b.lead >= 4 and b.item is not None:
+            # a note whose top line the OCR read is not its first (only "fore the" of "In the Year of
+            # the World 3291, before the vulgar Æra": it stood five lines low, over the note below,
+            # p. 730): as many lines higher as its words before that line take
+            before = " ".join(plain(b.item.text).split()[:b.lead])
+            b.y = max(0.0, b.y - wrap_lines(before, b.w, b.size, _times(b.item.italic)) * b.line_h)
     return blocks
 
 
