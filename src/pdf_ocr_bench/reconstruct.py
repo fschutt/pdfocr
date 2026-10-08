@@ -703,6 +703,11 @@ def unread_ink(layout: PageLayout, lines: list[Line], prev: list[Line], lh: floa
     py = min((l.box.y0 for l in prev), default=0)
     px1 = max((l.box.x1 for l in prev if l.box.y0 < py + 0.6 * lh), default=0)
     after = [r for r in runs if (abs(r[0].y0 - py) < 0.6 * lh and r[0].x0 >= px1 - lh) or r[0].y0 >= py + 0.6 * lh]
+    if prev and max(l.box.x1 for l in prev) - min(l.box.x0 for l in prev) > 10 * lh:
+        # (in a margin, not in the text it follows: a word of that text Vision's box missed by a
+        # few px stood for a Hebrew note, which was set in the paragraph's first lines, p. 106)
+        tx0, tx1 = min(l.box.x0 for l in prev), max(l.box.x1 for l in prev)
+        after = [r for r in after if r[-1].x1 < tx0 + lh or r[0].x0 > tx1 - lh]
     if not after:
         return None
     run = min(after, key=lambda r: (r[0].y0 >= py + 0.6 * lh, r[0].y0, r[0].x0))
@@ -728,6 +733,14 @@ def place_lineless(items: list[Item], lines: list[Line], layout: PageLayout) -> 
     for it in items:
         for i in it.lines:
             owners.setdefault(i, []).append(it.text)
+    # note strips whose lines are mostly pieces of paragraphs' lines
+    kind_of = {i: it.kind for it in items for i in it.lines}
+    text_strips = set()
+    for z in layout.zones:
+        if z.role == "notes":
+            mine = [l for l in lines if l.zone == z.id and l.id in kind_of]
+            if mine and sum(kind_of[l.id] == "paragraph" for l in mine) > 0.5 * len(mine):
+                text_strips.add(z.id)
     loose = []
     for l in lines:
         left: dict[str, int] = {}
@@ -750,8 +763,9 @@ def place_lineless(items: list[Item], lines: list[Line], layout: PageLayout) -> 
             continue
         hit = locate(item.text, loose, lh)
         # the note strips beside the item before it (one elsewhere on the page is no margin here:
-        # its x at this height is in the text, 174 pt of a paragraph kept free for it, p. 705)
-        strips = [z for z in layout.zones if z.role == "notes" and prev
+        # its x at this height is in the text, 174 pt of a paragraph kept free for it, p. 705; nor
+        # one whose lines are the ends of a paragraph's, cut off by the layout, p. 106)
+        strips = [z for z in layout.zones if z.role == "notes" and prev and z.id not in text_strips
                   and z.box.y0 - 2 * lh <= min(l.box.y0 for l in prev) <= z.box.y1]
         if not hit and _ratio_of(item.text) == HEBREW_LETTER:
             hit = unread_ink(layout, lines + made, prev, lh)
@@ -1656,6 +1670,12 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
     if ("text", False) in area_size and ("notes", False) not in area_size and ("notes", False) in area_of.values():
         area_size[("notes", False)] = NOTE_TEXT * area_size[("text", False)]
         measures[("notes", False)] = [(area_size[("notes", False)], 1)]
+    # and the margin notes in a smaller type than the text, as the book's always are (0.65-0.88 of
+    # it: measured on their capitals and figures they came out within 6% of the text and were set
+    # in its size, p. 106; the book's median is 0.79)
+    if ("text", False) in area_size and ("notes", False) in area_size:
+        text_size = area_size[("text", False)]
+        area_size[("notes", False)] = min(max(area_size[("notes", False)], 0.65 * text_size), 0.88 * text_size)
     # and no larger than its rows are apart (the book is set solid): footnotes measured 35 pt by
     # their capitals and figures stand in rows 28.5 pt apart (p. 155)
     for area in area_size:
@@ -2004,10 +2024,15 @@ def fit_round(target: Path, page_blocks: dict[int, list[Block]], pages_meta: lis
                     shrunk[p["page_num"]] = shrunk.get(p["page_num"], 0) + 1
                     continue
                 end = min(block.limit, report["height_pt"])
-                if not above and rendered["y1"] > end - 0.1 * block.line_h and end - block.y - 0.3 * block.line_h > block.line_h:
-                    # and one so moved that runs past the page's end (or the footnotes) a step smaller
-                    # still, by itself (its group's other notes have their room)
-                    factor = max(0.85, min(0.97, (end - block.y - 0.3 * block.line_h) / max(rendered["y1"] - block.y, 1.0)))
+                wide = rendered["x1"] > block.x + block.w + 0.25 * block.size
+                if not above and (wide or rendered["y1"] > end - 0.1 * block.line_h) and end - block.y - 0.3 * block.line_h > block.line_h:
+                    # and one so moved that runs past the page's end (or the footnotes), or one with a
+                    # word wider than its margin ("Mechilta." into the paragraph beside it, p. 106),
+                    # a step smaller still, by itself (its group's other notes have their room)
+                    factor = (end - block.y - 0.3 * block.line_h) / max(rendered["y1"] - block.y, 1.0)
+                    if wide:
+                        factor = min(factor, block.w / max(rendered["x1"] - block.x, 1.0))
+                    factor = max(0.85, min(0.97, factor))
                     if block.size * factor >= MIN_FIT * block.start_size:
                         block.size *= factor
                         _follow_size(block)
