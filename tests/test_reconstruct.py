@@ -254,6 +254,35 @@ def test_a_paragraph_listed_out_of_order_in_another_band_of_its_column_is_one_pa
             "but in the seventh year, Jehoiada procured him to be secretly acknowledged King by the principal "
             "Officers, who had the care of")
     assert len(column_parts(Item("column0", text, [l.id for l in lines]), lines, 25)) == 1
+    # a row read twice, the second reading listed after the short line below it (p. 1003); the
+    # rest of a line the layout cut off, listed after the lines below it (p. 904)
+    rows = [("B1", "phetels Huldah. Many a have been of o-", 385, 1298, 385),
+            ("B2", "pinion;", 385, 550, 449),
+            ("B3", "hat the Lame tae been of a", 543, 1289, 392),
+            ("B4", "miah, which are ftill in our hands, were", 392, 1276, 500),
+            ("B5", "compofed at the death of Jofiah; and that", 385, 1283, 556),
+            ("B6", "thefe are the Lamentations", 392, 1150, 613),
+            ("B7", "men-", 1170, 1283, 613)]
+    lines = [Line(i, t, Box(x0, y, x1, y + 40), [], "column0") for i, t, x0, x1, y in rows]
+    order = ["B1", "B2", "B3", "B4", "B5", "B6", "B7"]
+    text = ("phetess Huldah. Many have been of opinion, that the Lamentations of Jeremiah, which are still in "
+            "our hands, were composed at the death of Josiah; and that these are the Lamentations mentioned")
+    by = {l.id: l for l in lines}
+    assert len(column_parts(Item("column0", text, order), [by[i] for i in order], 25)) == 1
+    late = ["B1", "B2", "B3", "B4", "B5", "B6"]
+    assert len(column_parts(Item("column0", text, late + ["B7"]), [by[i] for i in ["B1", "B2", "B4", "B5", "B6", "B3", "B7"]], 25)) == 1
+
+
+def test_the_column_a_paragraph_opens_in_reads_its_first_word():
+    from pdf_ocr_bench.reconstruct import column_parts
+
+    # "of the", the rest of the first line Vision read in pieces, is no column of its own
+    rows = [("L137", "ELIONEUS,", 1384, 1752, 3777), ("L139", "High-Prieft", 1783, 2070, 3783),
+            ("L157", "of the", 2099, 2260, 3774), ("L141", "Teres: he lucceeded Matthias the fon of", 1334, 2264, 3833),
+            ("L159", "Ana-", 2131, 2257, 3884)]
+    lines = [Line(i, t, Box(x0, y, x1, y + 45), [], "column1") for i, t, x0, x1, y in rows]
+    text = "ELIONEUS, High-Priest of the Jews: he succeeded Matthias the son of Ananus."
+    assert len(column_parts(Item("column1", text, [l.id for l in lines]), lines, 25)) == 1
 
 
 def test_a_note_read_only_from_its_last_line_starts_where_its_first_was_printed():

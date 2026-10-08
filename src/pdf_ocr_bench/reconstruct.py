@@ -501,7 +501,13 @@ def column_parts(item: Item, group: list[Line], lh: float) -> list[tuple[Item, l
             # listed after the ones below it in the next band made a second part of one column's
             # paragraph, over the first, p. 951)
             across = min(line.box.x1, prev.box.x1) - max(line.box.x0, prev.box.x0) < 0.5 * max(line.box.w, prev.box.w)
-            if line.box.y0 < prev.box.y0 - 2 * lh and abs(line.box.x0 - prev.box.x0) > 4 * lh and across:
+            # (nor a second reading of a row the part has, nor the rest of one of its lines: "hat the
+            # Lame tae been of a" on the row of "phetels Huldah. Many a have been of o-", listed after
+            # the short line below it, p. 1003; the line ends the layout cut off as a note strip,
+            # "who", "was,", "possi-", p. 904. A gutter is wider: 40 px)
+            again = any(abs(line.box.y0 - m.box.y0) < 0.5 * lh
+                        and min(line.box.x1, m.box.x1) > max(line.box.x0, m.box.x0) - 0.8 * lh for m in runs[-1])
+            if line.box.y0 < prev.box.y0 - 2 * lh and abs(line.box.x0 - prev.box.x0) > 4 * lh and across and not again:
                 runs.append([line])
             else:
                 runs[-1].append(line)
@@ -574,9 +580,11 @@ def _by_column(text: str, group: list[Line], lh: float) -> list[list[Line]] | No
     head = [k for k in (_norm_word(plain(w)) for w in text.split()[:4]) if k]
 
     def opens(column: list[Line]) -> int:
+        # (its first word among them: "of the" of "ELIONEUS, High-Priest of the", the rest of a
+        # first line Vision read in pieces, is no opening, p. 604)
         top = min(column, key=lambda l: l.box.y0)
         read = [_norm_word(w) for w in top.text.split()[:6]]
-        return sum(1 for w in head if w in read)
+        return sum(1 for w in head if w in read) if head and head[0] in read else 0
     first = max(range(len(columns)), key=lambda k: (opens(columns[k]), -k))
     # (only when the model's first line is not where the text begins: else its order stands, a
     # line ending in a column of its own is no part, p. 80's "Kingdom")

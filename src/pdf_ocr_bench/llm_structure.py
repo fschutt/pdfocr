@@ -129,8 +129,8 @@ def to_items(answer: dict, lines: list, layout: PageLayout):
         items.append(Item(zone=zone, text=text, lines=ids, kind=a.get("kind", "paragraph"),
                           drop_cap=(a.get("drop_cap") or "")[:1], align=a.get("align") or "justify",
                           italic=bool(a.get("italic")), label=str(a.get("zone") or "")))
+    _join_split(items, known)  # (before the trim: a trimmed paragraph ends mid-sentence)
     _trim_repeated(items, known)
-    _join_split(items, known)
     # lines the answer left out: fine when they are a little junk, not when text went missing
     missing = sum(len(l.text) for i, l in known.items() if i not in used)
     total = sum(len(l.text) for l in lines) or 1
@@ -182,7 +182,8 @@ def _join_split(items: list, known: dict) -> None:
     row with it, are one paragraph: Vision read the first line in two pieces (the headword and
     the rest), and the model made "ABIMELECH. The Priest of the" an item and "Lord, who gave
     Goliath's Sword ..." another, with the headword's line; both were set at that row (p. 35,
-    p. 792)."""
+    p. 792). Or Vision read the row twice ("phetess Huldah. Many have been of" | "opinion, that
+    the Lamentations", p. 1003)."""
     from .reconstruct import plain
 
     k = 0
@@ -193,8 +194,7 @@ def _join_split(items: list, known: dict) -> None:
         end = plain(a.text).rstrip().rstrip("\"'\u201d\u2019)")
         if (a.kind == b.kind == "paragraph" and "foot" not in (a.label + b.label).lower() and la and lb
                 and len(la) <= 2 and end and end[-1] not in ".!?:;"
-                and any(abs(x.box.y0 - y.box.y0) < 0.5 * max(x.box.h, 1) and min(x.box.x1, y.box.x1) < max(x.box.x0, y.box.x0)
-                        and x.zone == y.zone for x in la for y in lb)):
+                and any(abs(x.box.y0 - y.box.y0) < 0.5 * max(x.box.h, 1) and x.zone == y.zone for x in la for y in lb)):
             items[k] = replace(a, text=a.text.rstrip() + " " + b.text.lstrip(), lines=a.lines + [i for i in b.lines if i not in a.lines])
             del items[k + 1]
             continue
