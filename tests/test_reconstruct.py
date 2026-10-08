@@ -109,6 +109,9 @@ def test_answer_is_checked_against_the_ocr_lines():
     assert items[1].zone == "column0"  # an unknown zone: the zone its lines are in
     lost = {"items": [{"zone": "column0", "kind": "paragraph", "lines": ["L3"], "text": "Second paragraph."}]}
     assert to_items(lost, lines, layout) is None  # most of the page's text left out
+    empty = {"items": [{"zone": "column0", "kind": "paragraph", "lines": ["L1", "L2"], "text": ""},
+                       {"zone": "column0", "kind": "paragraph", "lines": ["L3"], "text": "Second paragraph."}]}
+    assert to_items(empty, lines, layout) is None  # lines listed, none of their text read (p. 247)
 
 
 def test_a_line_listed_for_two_items_belongs_to_the_one_whose_text_has_it():

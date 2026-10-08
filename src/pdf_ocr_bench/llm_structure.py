@@ -119,8 +119,11 @@ def to_items(answer: dict, lines: list, layout: PageLayout):
     items, used = [], set()
     for k, a in enumerate(answered):
         ids = lines_of[k]
-        used.update(ids)
         text = clean_marks(normalize_markup(a.get("text", "").strip()))
+        # (an item with lines and no text read none of them: the model listed a column's 34 lines
+        # and the footnotes' with empty texts, and the page lost 40% of its text, p. 247)
+        if a.get("kind") == "noise" or plain(text).strip():
+            used.update(ids)
         if a.get("kind") == "noise" or not plain(text).strip():
             continue
         # no lines of its own (a margin note or a title line the model read from the scan, which
@@ -400,9 +403,14 @@ class Structurer:
             return ""
         known = {l.id for l in r["lines"]}
         listed = {i for a in answer.get("items", []) for i in a.get("lines", [])} & known
-        zones = sorted({l.zone for l in r["lines"] if l.id not in listed})
-        return (f"\n\nAn earlier answer to this page listed only {len(listed)} of its {len(known)} OCR lines and "
-                f"left out zones {', '.join(zones)}. Answer the whole page: every OCR line in exactly one item.")
+        empty = {i for a in answer.get("items", []) if a.get("kind") != "noise" and not str(a.get("text") or "").strip()
+                 for i in a.get("lines", [])} & known
+        read = listed - empty
+        zones = sorted({l.zone for l in r["lines"] if l.id not in read})
+        also = f" ({len(empty)} of them in items with no text)" if empty else ""
+        return (f"\n\nAn earlier answer to this page read only {len(read)} of its {len(known)} OCR lines{also} and "
+                f"left out zones {', '.join(zones)}. Answer the whole page: every OCR line in exactly one item, "
+                f"each item with its full text.")
 
     def collect(self) -> dict[int, list]:
         """{page index: items} for the pages the model answered."""
