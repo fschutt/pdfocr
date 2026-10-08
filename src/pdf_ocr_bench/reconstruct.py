@@ -1332,6 +1332,21 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
         for it in marked:
             if "foot" not in it.label.lower():
                 it.label = "footnotes (marked)"
+    # and a paragraph the model put in the footnotes' zone with no mark, a line or more above the
+    # first marked footnote, is the last line of a column the layout took into their band
+    # ("Nicanor, who was very well acquainted with", joined to the footnotes, p. 107)
+    def mark(it: Item) -> bool:
+        return bool(FOOT_MARK.match(it.text) or LETTER_MARK.match(it.text))
+
+    foot_items = [(it, g) for it in items if is_footnote(it, zones) and (g := [by_id[i] for i in it.lines if i in by_id])]
+    marked_tops = [min(l.box.y0 for l in g) for it, g in foot_items if mark(it)]
+    columns_ = [z for z in layout.zones if z.role == "column"]
+    if marked_tops and columns_:
+        for it, g in foot_items:
+            if it.kind == "paragraph" and not mark(it) and max(l.box.y0 for l in g) < min(marked_tops) - layout.line_height:
+                cx, cy = sum((l.box.x0 + l.box.x1) / 2 for l in g) / len(g), min(l.box.y0 for l in g)
+                col = min(columns_, key=lambda z: _distance(z.box, cx, cy))
+                it.zone = it.label = col.id
 
     def em_of(group: list[Line]) -> float:
         # a Vision line box is cap height + descender, ~1.05 em for this kind of face
