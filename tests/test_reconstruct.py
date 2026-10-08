@@ -159,6 +159,44 @@ def test_a_note_is_found_by_its_words_that_vision_ran_into_the_text():
     assert locate("Gen. xii. 3.", lines, 30) is None
 
 
+def test_a_line_given_to_an_item_whose_text_lacks_it_goes_to_the_one_that_has_it():
+    layout = _layout()
+    lines = [Line("L1", "ALE", Box(400, 50, 500, 80), [], "column0"),
+             Line("L2", "Adna however went frequently to the", Box(100, 100, 900, 130), [], "column0"),
+             Line("L3", "Cave to visit her Son, and give him Milk", Box(100, 140, 900, 170), [], "column0")]
+    answer = {"items": [
+        {"zone": "column0", "kind": "heading", "lines": ["L1", "L2"], "text": "ALE"},  # ids a line off
+        {"zone": "column0", "kind": "paragraph", "lines": ["L3"],
+         "text": "Adna however went frequently to the Cave to visit her Son, and give him Milk."},
+    ]}
+    assert [i.lines for i in to_items(answer, lines, layout)] == [["L1"], ["L2", "L3"]]
+
+
+def test_a_paragraph_ends_where_another_items_text_it_repeats_begins():
+    layout = _layout()
+    lines = [Line("A1", "Coele-Syria is distinguished by no particular name", Box(100, 100, 900, 130), [], "column0"),
+             Line("A2", "in Scripture, but is comprized under Aram", Box(100, 140, 900, 170), [], "column0"),
+             Line("B1", "reached to Coele-Syria; of which notwithstanding I do not know", Box(520, 100, 900, 130), [], "column0")]
+    tail = "reached to Coele-Syria; of which notwithstanding I do not know that there are any good proofs."
+    answer = {"items": [
+        {"zone": "column0", "kind": "paragraph", "lines": ["A1", "A2"],
+         "text": "Coele-Syria is distinguished by no particular name in Scripture, but is comprized under Aram " + tail},
+        {"zone": "column0", "kind": "paragraph", "lines": ["B1"], "text": tail},
+    ]}
+    items = to_items(answer, lines, layout)
+    assert items[0].text == "Coele-Syria is distinguished by no particular name in Scripture, but is comprized under Aram"
+    assert items[1].text == tail
+
+
+def test_a_note_read_only_from_its_last_line_starts_where_its_first_was_printed():
+    from pdf_ocr_bench.reconstruct import _lead_words
+
+    text = "In the Year of the World 3291, before J. C. 709, before the vulgar Æra 705."
+    assert _lead_words(text, Line("N1", "fore the", Box(0, 0, 10, 10), [], "notes0")) == 11  # "be-fore the"
+    assert _lead_words(text, Line("N1", "In the Year of", Box(0, 0, 10, 10), [], "notes0")) == 0
+    assert _lead_words(text, Line("N1", "the", Box(0, 0, 10, 10), [], "notes0")) == 0  # one word: no telling where
+
+
 def test_pitch_ignores_the_order_lines_are_listed_in_and_notes_keep_their_margin():
     layout = PageLayout(width=1000, height=1000, line_height=30)
     layout.zones = [Zone("column", Box(100, 100, 900, 600), 0)]

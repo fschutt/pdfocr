@@ -573,7 +573,7 @@ def _lead_words(text: str, top: Line) -> int:
             n += 1
         if n > best:
             best, at = n, j
-    return at if best >= min(2, len(read)) else 0
+    return at if best >= 2 else 0
 
 
 def _split_near(words: list[str], n: int, last: str) -> int:
