@@ -489,14 +489,16 @@ def column_parts(item: Item, group: list[Line], lh: float) -> list[tuple[Item, l
     """A paragraph that runs on into the next column: one part per column (a new part where its
     lines go back up the page), each with its share of the text (by the OCR's characters), in the
     zone most of its lines stand in."""
-    runs: list[list[Line]] = [[group[0]]]
-    for line in group[1:]:
-        prev = runs[-1][-1]
-        # back up the page, and across to another column (lines merely listed out of order stay)
-        if line.box.y0 < prev.box.y0 - 2 * lh and (line.zone != prev.zone or abs(line.box.x0 - prev.box.x0) > 4 * lh):
-            runs.append([line])
-        else:
-            runs[-1].append(line)
+    runs = _by_column(item.text, group, lh)
+    if runs is None:
+        runs = [[group[0]]]
+        for line in group[1:]:
+            prev = runs[-1][-1]
+            # back up the page, and across to another column (lines merely listed out of order stay)
+            if line.box.y0 < prev.box.y0 - 2 * lh and (line.zone != prev.zone or abs(line.box.x0 - prev.box.x0) > 4 * lh):
+                runs.append([line])
+            else:
+                runs[-1].append(line)
     if len(runs) == 1:
         return [(replace(item, zone=_majority_zone(group, item.zone)), group)]
     chars = [sum(len(l.text) for l in run) for run in runs]
@@ -522,6 +524,53 @@ def column_parts(item: Item, group: list[Line], lh: float) -> list[tuple[Item, l
             out.append((replace(item, text=piece, lines=[l.id for l in run], zone=_majority_zone(run, item.zone),
                                 drop_cap=item.drop_cap if k == 0 else ""), run))
     return out or [(item, group)]
+
+
+def _by_column(text: str, group: list[Line], lh: float) -> list[list[Line]] | None:
+    """A paragraph's lines column by column, when they stand in more than one (where they start,
+    ten lines' height apart and more): first the column whose lines read its text's first words,
+    then the others left to right, each top to bottom; None for one column. (The model may list
+    a line of the next column first: "modeus, which he will find" of "As-/modeus" set the whole
+    paragraph at the top of its column, p. 247.)"""
+    lines = sorted(group, key=lambda l: l.box.x0)
+    columns: list[list[Line]] = [[lines[0]]]
+    for line in lines[1:]:
+        if line.box.x0 - columns[-1][-1].box.x0 > 10 * lh:
+            columns.append([line])
+        else:
+            columns[-1].append(line)
+    # (a column's lines start within a few lines' height: a note Vision ran into a line moves its
+    # start by less than that. Nor is a "column" whose every line stands on a row of another's
+    # one: the pieces Vision read a printed line in, "But for you," beside "Spirit exercies his
+    # power.")
+    merged = True
+    while merged and len(columns) > 1:
+        merged = False
+        for k, c in enumerate(columns):
+            others = [(j, o) for j, o in enumerate(columns) if j != k]
+            for j, o in others:
+                if all(any(abs(l.box.y0 - m.box.y0) < 0.5 * lh for m in o) for l in c):
+                    columns[j] = o + c
+                    del columns[k]
+                    merged = True
+                    break
+            if merged:
+                break
+    if len(columns) < 2:
+        return None
+    head = [k for k in (_norm_word(plain(w)) for w in text.split()[:4]) if k]
+
+    def opens(column: list[Line]) -> int:
+        top = min(column, key=lambda l: l.box.y0)
+        read = [_norm_word(w) for w in top.text.split()[:6]]
+        return sum(1 for w in head if w in read)
+    first = max(range(len(columns)), key=lambda k: (opens(columns[k]), -k))
+    # (only when the model's first line is not where the text begins: else its order stands, a
+    # line ending in a column of its own is no part, p. 80's "Kingdom")
+    if group[0] in columns[first] or opens(columns[first]) < 2:
+        return None
+    order = [columns[first]] + [c for k, c in enumerate(columns) if k != first]
+    return [sorted(c, key=lambda l: (l.box.y0, l.box.x0)) for c in order]
 
 
 def _run_ends(runs: list[list[Line]], words: list[str]) -> list[int | None]:
