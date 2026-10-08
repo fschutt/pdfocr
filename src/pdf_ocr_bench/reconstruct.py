@@ -1725,6 +1725,11 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
     if ("text", False) in area_size and ("notes", False) in area_size:
         text_size = area_size[("text", False)]
         area_size[("notes", False)] = min(max(area_size[("notes", False)], 0.65 * text_size), 0.88 * text_size)
+    # (the footnotes too: 0.6-0.95 of the text, the book's median 0.84; measured on figures and
+    # capitals they came out at 51 pt for text of 39, p. 65)
+    if ("text", False) in area_size and ("footnotes", False) in area_size:
+        text_size = area_size[("text", False)]
+        area_size[("footnotes", False)] = min(max(area_size[("footnotes", False)], 0.6 * text_size), 0.95 * text_size)
     # and no larger than its rows are apart (the book is set solid): footnotes measured 35 pt by
     # their capitals and figures stand in rows 28.5 pt apart (p. 155)
     for area in area_size:
@@ -1745,10 +1750,15 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
         # area (a verse quoted in smaller type) keeps its own size; a short reference does not
         # (its figures and numerals make its measure unsteady)
         glyphs = glyph_size.get(area) or glyph_size.get((area[0], False)) or size
-        if id(b) in own and own[id(b)][1] >= 20 and abs(own[id(b)][0] / glyphs - 1) > 0.09:
+        # (smaller only: one measured larger is its capitals and figures, a headword's ADAMAH set
+        # a short entry at 45 pt among 39, a line more than printed, p. 65; and no larger than its
+        # own rows are apart, the book is set solid)
+        if id(b) in own and own[id(b)][1] >= 20 and own[id(b)][0] / glyphs < 0.91:
             text = plain(b.item.text)
             if sum(c.isalpha() for c in text) >= 0.6 * len(text.replace(" ", "")):
                 size = own[id(b)][0] * size / glyphs  # as much smaller as its area is by its lines
+                if b.steps:
+                    size = min(size, sum(b.steps) / len(b.steps))
                 b.measure = ""
                 own_size.add(id(b))
                 if all(abs(level / size - 1) > 0.06 for level in levels):
