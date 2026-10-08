@@ -157,6 +157,17 @@ def test_a_note_is_found_by_its_words_that_vision_ran_into_the_text():
     box, _ = locate("Matth. xxi.16,17.", lines, 30)  # its figures unread: the name alone will do
     assert (box.x0, box.y0) == (800, 300)
     assert locate("Gen. xii. 3.", lines, 30) is None
+    # its two words run together onto the text's last word, and its name alone so (p. 678)
+    glued = [Line("L3", "made a Cove-Gen.xv.", Box(100, 500, 900, 530),
+                  words(500, ("made", 100, 250), ("a", 270, 300), ("Cove-Gen.xv.", 320, 900)), "column0"),
+             Line("L4", "gave them lightExod: sui", Box(100, 700, 900, 730),
+                  words(700, ("gave", 100, 250), ("them", 270, 400), ("lightExod:", 420, 820), ("sui", 840, 900)), "column0")]
+    box, _ = locate("Gen. xv. 17.", glued, 30)
+    assert box.y0 == 500 and box.x0 > 500
+    box, _ = locate("Exod. xii. 21.", glued, 30)
+    assert box.y0 == 700 and box.x0 > 600
+    assert locate("Exod. xii. 21.", [Line("L5", "the Exodus of", Box(100, 900, 900, 930),
+                                          words(900, ("the", 100, 200), ("Exodus", 220, 500), ("of", 520, 600)), "column0")], 30) is None
 
 
 def test_a_line_given_to_an_item_whose_text_lacks_it_goes_to_the_one_that_has_it():

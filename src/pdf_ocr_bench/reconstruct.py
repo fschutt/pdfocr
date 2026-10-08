@@ -687,20 +687,38 @@ def locate(text: str, lines: list[Line], lh: float) -> tuple[Box, list] | None:
             return None
         return w, replace(box, x0=box.x1 - int(box.w * (len(w) + 1) / max(len(k) + 1, 1)))
 
+    def pieces(line: Line) -> list[tuple[str, Box]]:
+        # its words, those Vision ran together at a stop split there ("Cove-Gen.xv." -> "Cove-Gen."
+        # "xv."), each with its share of the box
+        out = []
+        for t, b in line.words:
+            parts = re.findall(r".+?(?:[.:;,]+(?=\w)|$)", t)
+            if len(parts) < 2:
+                out.append((t, b))
+                continue
+            x = b.x0
+            for part in parts:
+                w = int(b.w * len(part) / len(t))
+                out.append((part, replace(b, x0=x, x1=x + w)))
+                x += w
+        return out
+
     def matched(line: Line) -> list:
         left, out = dict(want), []
-        for t, b in line.words:
+        for t, b in pieces(line):
             h = word_hit(t, b, left)
             if h is not None:
                 left[h[0]] -= 1
-                out.append(h)
+                out.append((h[0], h[1], _norm_word(t) != h[0]))
         return out
     scored = [(matched(l), l) for l in lines]
     best_m, best = max(scored, key=lambda s: (len(s[0]), -s[1].box.y0), default=([], None))
     best_n, n_words = len(best_m), sum(want.values())
     # (two words: one will do when it is a word, not a figure: "Matth." of "Matth. xxi.16,17.",
-    # whose figures Vision did not read, p. 705)
-    enough = 1 if n_words == 1 or (n_words == 2 and any(len(k) >= 4 and k.isalpha() for k, _ in best_m)) \
+    # whose figures Vision did not read, p. 705. Four: one, a name Vision ran onto the end of a
+    # word of the text beside it, "lightExod:" of "Exod. xii. 21.", p. 678)
+    enough = 1 if n_words == 1 or (n_words == 2 and any(len(k) >= 4 and k.isalpha() for k, _, _ in best_m)) \
+        or (n_words <= 4 and any(glued and len(k) >= 3 and k.isalpha() for k, _, glued in best_m)) \
         else max(2, 0.4 * n_words)
     if best is None or best_n < enough:
         return None
@@ -708,7 +726,7 @@ def locate(text: str, lines: list[Line], lh: float) -> tuple[Box, list] | None:
     # the line's start, not every "14" in the text beside it
     keys = dict(want)
     flags = []
-    for t, b in best.words:
+    for t, b in pieces(best):
         h = word_hit(t, b, keys)
         if h is not None:
             keys[h[0]] -= 1
@@ -734,7 +752,7 @@ def locate(text: str, lines: list[Line], lh: float) -> tuple[Box, list] | None:
     for line in sorted(lines, key=lambda l: l.box.y0):
         if not (best.box.y0 - 0.5 * lh <= line.box.y0 <= best.box.y0 + (n_words / 2 + 1) * 1.5 * lh):
             continue
-        for t, b in line.words:
+        for t, b in pieces(line):
             h = word_hit(t, b, left)
             if h is not None and h[1].x1 >= x0 and h[1].x0 <= x1:
                 left[h[0]] -= 1
@@ -818,10 +836,11 @@ def place_lineless(items: list[Item], lines: list[Line], layout: PageLayout) -> 
             else:
                 free.append((t, b))
         loose.append(replace(l, words=free))
+    prev_kind = ""
     for k, item in enumerate(items):
         own = [l for l in lines + made if l.id in item.lines]
         if own:
-            prev = own
+            prev, prev_kind = own, item.kind
             continue
         hit = locate(item.text, loose, lh)
         # the note strips beside the item before it (one elsewhere on the page is no margin here:
@@ -833,6 +852,12 @@ def place_lineless(items: list[Item], lines: list[Line], layout: PageLayout) -> 
             hit = unread_ink(layout, lines + made, prev, lh)
         if hit:
             box, words = hit
+        elif item.kind == "note" and prev and prev_kind == "note":
+            # after a note: under it, in its margin (a passage's notes are listed in order:
+            # "Judg. xiii. 19, 20." between two notes Vision ran into the text's lines went to the
+            # strip on the other side of the page, under all its notes, p. 678)
+            y0 = max(l.box.y1 for l in prev) + int(0.3 * lh)
+            box, words = Box(min(l.box.x0 for l in prev), y0, max(l.box.x1 for l in prev), int(y0 + 1.2 * lh)), []
         elif item.kind == "note" and prev and not strips:
             # beside the start of the entry it follows; its column's margin is set later
             y0 = min(l.box.y0 for l in prev)
@@ -867,7 +892,7 @@ def place_lineless(items: list[Item], lines: list[Line], layout: PageLayout) -> 
         if zone is not None and item.zone not in {z.id for z in layout.zones}:
             item.zone = zone.id
         if item.kind != "note" or line_id not in floating:
-            prev = [line]  # notes beside one entry stay beside its start
+            prev, prev_kind = [line], item.kind  # notes beside one entry stay beside its start
     return made, floating
 
 
@@ -913,9 +938,8 @@ def own_extent(text: str, group: list[Line]) -> Box | None:
     return out
 
 
-def row_extent(group: list[Line], lh: float, ragged: bool = False) -> tuple[float, float, int]:
-    """Where `group`'s printed lines (their pieces joined) mostly start and end (where the longest
-    ends, for `ragged` text: a margin note), and how many printed lines it has."""
+def _rows(group: list[Line], lh: float) -> list[list[float]]:
+    """`group`'s printed lines, their pieces joined: [x0, x1, y0] each, top to bottom."""
     rows: list[list[float]] = []
     for l in sorted(group, key=lambda l: l.box.y0):
         if rows and l.box.y0 - rows[-1][2] <= 0.5 * lh:
@@ -923,6 +947,13 @@ def row_extent(group: list[Line], lh: float, ragged: bool = False) -> tuple[floa
             rows[-1][1] = max(rows[-1][1], l.box.x1)
         else:
             rows.append([l.box.x0, l.box.x1, l.box.y0])
+    return rows
+
+
+def row_extent(group: list[Line], lh: float, ragged: bool = False) -> tuple[float, float, int]:
+    """Where `group`'s printed lines (their pieces joined) mostly start and end (where the longest
+    ends, for `ragged` text: a margin note), and how many printed lines it has."""
+    rows = _rows(group, lh)
     # (where most end: justified lines end at the column's edge; a line Vision ran across the gutter
     # into the next column must not carry the measure there, p. 914 and p. 947)
     x0s, x1s = sorted(r[0] for r in rows), sorted(r[1] for r in rows)
@@ -1235,7 +1266,10 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
     body = [z for z in layout.zones if z.role == "column" and z.glyph >= 0.9 * body_glyph]
     if main:
         foot_top = max(z.box.y1 for z in body) - 0.3 * layout.line_height
+        # (not a note the model read in a margin's strip: the last of a margin's notes, set under
+        # the one before it, was joined to the footnotes, p. 663)
         below = [(it, g) for it in items if it.kind in ("paragraph", "note") and "foot" not in it.label.lower()
+                 and not (it.kind == "note" and it.label in zones and zones[it.label].role == "notes")
                  and (g := [by_id[i] for i in it.lines if i in by_id]) and min(l.box.y0 for l in g) >= foot_top]
 
         def text_type(it: Item, g: list[Line]) -> bool:
@@ -1381,6 +1415,11 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
             # the text beside it, 130 pt over the paragraph, p. 37): that margin's
             beside = [(0.0, "left", m0) for m0, m1 in columns if m0 - reach < left < m0 - lh_ and centre < (m0 + m1) / 2] + \
                      [(0.0, "right", m1) for m0, m1 in columns if m1 + lh_ < right < m1 + reach and centre > (m0 + m1) / 2]
+        if not beside:
+            # or one inside the text's edge (a note found by its name Vision ran onto the last word
+            # of the line beside it, "lightExod:", has that word's share of its box, p. 678)
+            beside = [(0.0, "left", m0) for m0, m1 in columns if m0 < centre < m0 + 0.15 * (m1 - m0)] + \
+                     [(0.0, "right", m1) for m0, m1 in columns if m1 - 0.15 * (m1 - m0) < centre < m1]
         if not beside:
             return left, right
         _, side, edge = min(beside)
@@ -1557,9 +1596,14 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
                 # wider (a scan is skewed or curved: the column ends at 1662 here, at 1675 there,
                 # and a short entry took a line more than printed, p. 608)
                 left, right = measure
-                if ex1 > right and ex1 - right <= 0.03 * (right - left):
+                # (two of its lines at least printed to there: not the end of a line Vision ran a
+                # note into, three of six lines of a paragraph beside its notes, p. 734)
+                ends = _rows(group, layout.line_height)
+                if ex1 > right and ex1 - right <= 0.03 * (right - left) \
+                        and sum(abs(r[1] - ex1) <= 0.3 * layout.line_height for r in ends) >= 2:
                     right = ex1
-                if ex0 < left and left - ex0 <= 0.03 * (right - left):
+                if ex0 < left and left - ex0 <= 0.03 * (right - left) \
+                        and sum(abs(r[0] - ex0) <= 0.3 * layout.line_height for r in ends) >= 2:
                     left = ex0
             # a measure from its lines needs two printed lines (one is often a fragment the OCR read
             # of a paragraph whose text the model read from the scan: a 57 px "in" on p. 995)
