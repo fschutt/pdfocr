@@ -1017,6 +1017,9 @@ def _majority_zone(group: list[Line], default: str) -> str:
 
 
 FOOT_MARK = re.compile(r"\s*(?:<sup>[^<]{1,3}</sup>|<i>[a-z]</i>\s|[ᵃᵇᶜᵈᵉᶠᵍʰⁱʲᵏˡᵐⁿᵒᵖʳˢᵗᵘᵛʷˣʸᶻ*†‡§‖¶])")
+# a footnote's mark as a letter by itself before a capital ("k Herod. l. i. c. 181.", p. 313): no
+# paragraph starts so (a margin note may: "a Genes. ii. 13.")
+LETTER_MARK = re.compile(r"\s*[a-z] (?:<i>)?[A-Z\u0590-\u05ff]")
 NOTE_TEXT = 0.79  # margin notes' size to the text's (vol. 1: the median of 754 pages, p10 0.71)
 WRAP_QUANTILE = 0.1  # the paragraphs a page's text size is to fit in their printed lines: all but a tenth
 HEBREW_LETTER = 0.56  # height of a Hebrew letter in azul's Times, em (x-height 0.448, capitals 0.662)
@@ -1225,7 +1228,8 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
                 it.label = "footnotes (below the text)"
     # and by their reference marks, in the lower part of the page (a page the layout left as one
     # block has no columns to be below: p. 445)
-    marked = [it for it in items if it.kind in ("paragraph", "note") and FOOT_MARK.match(it.text)
+    marked = [it for it in items if it.kind in ("paragraph", "note")
+              and (FOOT_MARK.match(it.text) or (it.kind == "paragraph" and LETTER_MARK.match(it.text)))
               and (g := [by_id[i] for i in it.lines if i in by_id]) and min(l.box.y0 for l in g) > 0.6 * layout.height]
     if len(marked) >= 2:
         for it in marked:
