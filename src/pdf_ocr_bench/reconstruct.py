@@ -883,6 +883,7 @@ def _majority_zone(group: list[Line], default: str) -> str:
 
 
 FOOT_MARK = re.compile(r"\s*(?:<sup>[^<]{1,3}</sup>|<i>[a-z]</i>\s|[ᵃᵇᶜᵈᵉᶠᵍʰⁱʲᵏˡᵐⁿᵒᵖʳˢᵗᵘᵛʷˣʸᶻ*†‡§‖¶])")
+NOTE_TEXT = 0.79  # margin notes' size to the text's (vol. 1: the median of 754 pages, p10 0.71)
 WRAP_QUANTILE = 0.1  # the paragraphs a page's text size is to fit in their printed lines: all but a tenth
 HEBREW_LETTER = 0.56  # height of a Hebrew letter in azul's Times, em (x-height 0.448, capitals 0.662)
 
@@ -1205,10 +1206,14 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
             return left, right
         _, side, edge = min(beside)
         inked = margin_ink(edge, side, top, bottom)
+        # (never over the next column's text: between two columns the ink runs on into it, and a
+        # note set in the gutter stood in the text, a paragraph kept 210 pt clear of it, p. 120)
         if side == "left":
             outer = min([left] + [a for a, b in spans if edge - reach < (a + b) / 2 < edge] + ([inked] if inked else []))
+            outer = max([outer] + [m1 + gap for _, m1 in columns if m1 <= edge - lh_])
             return (outer, edge - gap) if edge - gap - outer >= 2 * lh_ else (left, right)
         outer = max([right] + [b for a, b in spans if edge < (a + b) / 2 < edge + reach] + ([inked] if inked else []))
+        outer = min([outer] + [m0 - gap for m0, _ in columns if m0 >= edge + lh_])
         return (edge + gap, outer) if outer - (edge + gap) >= 2 * lh_ else (left, right)
 
     def margin_ink(edge: float, side: str, top: float, bottom: float) -> float | None:
@@ -1246,21 +1251,30 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
         z = zones.get(line.zone)
         if z is None or z.role not in ("column", "text"):
             continue
+        outside = "right" if z.box.x0 + z.box.w / 2 > layout.width / 2 else "left"
         sides = [side for (zid, side) in margin_of if zid == z.id]
-        side = sides[0] if sides else ("right" if z.box.x0 + z.box.w / 2 > layout.width / 2 else "left")
+        side = sides[0] if sides else outside
+        cx = (line.box.x0 + line.box.x1) / 2
+        near = [(e0, e1) for e0, e1, a, b in spans_at
+                if a - 3 * lh < line.box.y1 and line.box.y0 < b + 3 * lh and e0 < cx < e1]
+        e0, e1 = near[0] if near else (line.box.x0, line.box.x1)
+
+        def room(side: str) -> tuple[float, float]:
+            probe = (e1 + 0.6 * lh, e1 + 0.7 * lh) if side == "right" else (e0 - 0.7 * lh, e0 - 0.6 * lh)
+            return into_margin(*probe, line.box.y0, line.box.y1)
+
         if (z.id, side) in margin_of:
             mx0, mx1 = margin_of[(z.id, side)]
         else:
             # beside the column's text as printed at its height (that of the entry it follows, whose
             # lines it was put beside), as wide as the margin's ink: the zone's own edge may be the
             # text's (a note in its last eighth stood in the text, p. 705), or a band across the
-            # page's columns (p. 630)
-            cx = (line.box.x0 + line.box.x1) / 2
-            near = [(e0, e1) for e0, e1, a, b in spans_at
-                    if a - 3 * lh < line.box.y1 and line.box.y0 < b + 3 * lh and e0 < cx < e1]
-            e0, e1 = near[0] if near else (line.box.x0, line.box.x1)
-            probe = (e1 + 0.6 * lh, e1 + 0.7 * lh) if side == "right" else (e0 - 0.7 * lh, e0 - 0.6 * lh)
-            mx0, mx1 = into_margin(*probe, line.box.y0, line.box.y1)
+            # page's columns (p. 630). A side with no room (the gutter between two columns): the
+            # column's outer side
+            mx0, mx1 = room(side)
+            if mx1 - mx0 < 2 * lh and side != outside:
+                side = outside
+                mx0, mx1 = room(side)
             if mx1 - mx0 < 2 * lh:  # no ink beside it: the white beside the text all the same
                 mx0, mx1 = ((e1 + 0.5 * lh, min(layout.width - 0.5 * lh, e1 + 6 * lh)) if side == "right"
                             else (max(0.5 * lh, e0 - 6 * lh), e0 - 0.5 * lh))
@@ -1295,9 +1309,12 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
         steps = sorted(b - a for a, b in zip(rows, rows[1:]))
         pitch = steps[len(steps) // 2] * px if steps else 1.2 * size0
         steps_pt = tuple(s * px for s in steps)
-        if item.kind == "heading" and len(group) == 1:
-            # one line as printed: its own box, the size that spans it
-            x0, w = first.box.x0 * px, first.box.w * px
+        if item.kind == "heading" and (len(group) == 1 or n == 1):
+            # one line as printed (in one piece or several Vision read apart: "(10" and ")" of the
+            # page number were set in a column-wide box, over the running head beside it, p. 35):
+            # the box of its pieces, the size that spans it
+            first = min(group, key=lambda l: l.box.x0)
+            x0, w = first.box.x0 * px, (max(l.box.x1 for l in group) - first.box.x0) * px
             face = _times(item.italic)
             label = plain(item.text)
             size = min(1.1 * size0, w / max(face.text_length(label, 1.0), 0.1))
@@ -1522,6 +1539,11 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
             area_size[area] = by_wrap[0]
             for b in members:
                 b.measure = "line breaks"
+    # margin notes nothing measured (Vision read none of them: they had the size of a box of two
+    # lines, the text's, p. 197): the book's notes are some four fifths of its text
+    if ("text", False) in area_size and ("notes", False) not in area_size and ("notes", False) in area_of.values():
+        area_size[("notes", False)] = NOTE_TEXT * area_size[("text", False)]
+        measures[("notes", False)] = [(area_size[("notes", False)], 1)]
     # and no larger than its rows are apart (the book is set solid): footnotes measured 35 pt by
     # their capitals and figures stand in rows 28.5 pt apart (p. 155)
     for area in area_size:
@@ -1581,8 +1603,9 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
             # a size of its own (or a measure of its glyphs off by its capitals): its own rows
             b.pitch = own if b.steps else area_pitch * b.size / area_size.get(area_of[id(b)], b.size)
             continue
-        # (its own, when it has rows enough and is set wider or closer)
-        if len(b.steps) >= 4 and abs(own / area_pitch - 1) > 0.09:
+        # (its own, when it has rows enough: a scan is not to scale all over, a column near the
+        # spine 40.1 pt a line where the page's median is 41.6, fourteen lines 20 pt longer, p. 51)
+        if len(b.steps) >= 4:
             b.pitch = own
             continue
         b.pitch = area_pitch
@@ -1612,6 +1635,7 @@ def blocks_html(blocks: list[Block], width_pt: float, height_pt: float, lang: st
   .page {{ position: relative; width: {width_pt:.2f}pt; height: {height_pt:.2f}pt; overflow: hidden; }}
   .region {{ position: absolute; color: #000; font-family: {font_family()}; hyphens: auto; }}
   .region p {{ margin: 0; }}
+  .region sup, .region sub {{ line-height: 0; }}
   .region .up {{ font-style: normal;{f" font-family: {font_family()};" if TYPEFACE else ""} }}{italic_css()}
   .pic {{ position: absolute; }}
 </style>

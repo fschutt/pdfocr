@@ -111,9 +111,12 @@ def to_items(answer: dict, lines: list, layout: PageLayout):
                 claims.setdefault(i, []).append(k)
     owner = {i: max(ks, key=lambda k: (_shared_pairs(known[i].text, plain(answered[k].get("text", ""))), -k))
              for i, ks in claims.items()}
+    lines_of = {k: [i for i in dict.fromkeys(a.get("lines", [])) if i in known and owner[i] == k]
+                for k, a in enumerate(answered)}
+    _reassign(lines_of, answered, known)
     items, used = [], set()
     for k, a in enumerate(answered):
-        ids = [i for i in dict.fromkeys(a.get("lines", [])) if i in known and owner[i] == k]
+        ids = lines_of[k]
         used.update(ids)
         text = clean_marks(normalize_markup(a.get("text", "").strip()))
         if a.get("kind") == "noise" or not plain(text).strip():
@@ -130,6 +133,40 @@ def to_items(answer: dict, lines: list, layout: PageLayout):
     if missing > 0.15 * total:
         return None
     return items
+
+
+def _pairs(text: str) -> set[tuple[str, str]]:
+    words = re.findall(r"\w+", text.lower().replace("ſ", "s").replace("f", "s"))
+    return set(zip(words, words[1:]))
+
+
+def _reassign(lines_of: dict[int, list[str]], answered: list[dict], known: dict) -> None:
+    """A line the answer gives an item whose text has next to none of it (under 30% of its pairs
+    of words), when one other item's text has most of it (60%), goes to that one: the line ids of
+    a page may be off by a line or two (p. 41 of vol. 1: its first lines given to the running
+    head, and two paragraphs a line each in turn), the text the model read is right. It goes
+    after that item's nearest line above it in its zone (the item's order: its column first)."""
+    from .reconstruct import plain
+
+    texts = [_pairs(plain(a.get("text", ""))) for a in answered]
+    moves = []
+    for k, ids in lines_of.items():
+        for i in ids:
+            pairs = _pairs(known[i].text)
+            if len(pairs) < 3:
+                continue
+            own = len(pairs & texts[k]) / len(pairs)
+            if own >= 0.3:
+                continue
+            scores = sorted(((len(pairs & t) / len(pairs), j) for j, t in enumerate(texts) if j != k), reverse=True)
+            if scores and scores[0][0] >= 0.6 and (len(scores) == 1 or scores[1][0] < 0.6):
+                moves.append((i, k, scores[0][1]))
+    for i, k, j in moves:
+        lines_of[k].remove(i)
+        line = known[i]
+        above = [n for n, m in enumerate(lines_of[j]) if known[m].zone == line.zone and known[m].box.y0 <= line.box.y0]
+        at = max(above, key=lambda n: known[lines_of[j][n]].box.y0) + 1 if above else 0
+        lines_of[j].insert(at, i)
 
 
 def _shared_pairs(line: str, text: str) -> int:
