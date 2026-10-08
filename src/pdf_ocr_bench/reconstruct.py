@@ -496,8 +496,12 @@ def column_parts(item: Item, group: list[Line], lh: float) -> list[tuple[Item, l
         runs = [[group[0]]]
         for line in group[1:]:
             prev = runs[-1][-1]
-            # back up the page, and across to another column (lines merely listed out of order stay)
-            if line.box.y0 < prev.box.y0 - 2 * lh and (line.zone != prev.zone or abs(line.box.x0 - prev.box.x0) > 4 * lh):
+            # back up the page, and across to another column (lines merely listed out of order stay,
+            # in another zone too: the layout may cut a column into bands, and an indented line
+            # listed after the ones below it in the next band made a second part of one column's
+            # paragraph, over the first, p. 951)
+            across = min(line.box.x1, prev.box.x1) - max(line.box.x0, prev.box.x0) < 0.5 * max(line.box.w, prev.box.w)
+            if line.box.y0 < prev.box.y0 - 2 * lh and abs(line.box.x0 - prev.box.x0) > 4 * lh and across:
                 runs.append([line])
             else:
                 runs[-1].append(line)
@@ -545,13 +549,20 @@ def _by_column(text: str, group: list[Line], lh: float) -> list[list[Line]] | No
     # start by less than that. Nor is a "column" whose every line stands on a row of another's
     # one: the pieces Vision read a printed line in, "But for you," beside "Spirit exercies his
     # power.")
+    # Nor one whose lines mostly stand across another's: the rest of a first line Vision read
+    # apart from its headword, "ABIMELECH." | "The Priest of the", p. 35)
+    def middle(c: list[Line], edge) -> float:
+        return sorted(edge(l) for l in c)[len(c) // 2]
+
     merged = True
     while merged and len(columns) > 1:
         merged = False
         for k, c in enumerate(columns):
             others = [(j, o) for j, o in enumerate(columns) if j != k]
             for j, o in others:
-                if all(any(abs(l.box.y0 - m.box.y0) < 0.5 * lh for m in o) for l in c):
+                across = (middle(c, lambda l: l.box.x0) < middle(o, lambda l: l.box.x1) - 2 * lh
+                          and middle(c, lambda l: l.box.x1) > middle(o, lambda l: l.box.x0) + 2 * lh)
+                if across or all(any(abs(l.box.y0 - m.box.y0) < 0.5 * lh for m in o) for l in c):
                     columns[j] = o + c
                     del columns[k]
                     merged = True
@@ -1224,10 +1235,25 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
     body = [z for z in layout.zones if z.role == "column" and z.glyph >= 0.9 * body_glyph]
     if main:
         foot_top = max(z.box.y1 for z in body) - 0.3 * layout.line_height
-        for it in items:
-            g = [by_id[i] for i in it.lines if i in by_id]
-            if it.kind in ("paragraph", "note") and g and min(l.box.y0 for l in g) >= foot_top and "foot" not in it.label.lower():
-                it.label = "footnotes (below the text)"
+        below = [(it, g) for it in items if it.kind in ("paragraph", "note") and "foot" not in it.label.lower()
+                 and (g := [by_id[i] for i in it.lines if i in by_id]) and min(l.box.y0 for l in g) >= foot_top]
+
+        def text_type(it: Item, g: list[Line]) -> bool:
+            # text in the text's type the columns' zones end above, with no footnote mark ("The
+            # Chronology of Daniel", under the last column zone, was joined to the footnotes, 1446 pt
+            # wide over both columns, p. 502). Two lines at least: one line's glyphs measure up to
+            # 1.2 of the text's, footnotes of several lines 0.73-0.88 (vol. 1)
+            glyphs = sorted(l.glyph for l in g if l.glyph)
+            return (len(glyphs) >= 2 and glyphs[len(glyphs) // 2] >= 0.95 * body_glyph
+                    and not FOOT_MARK.match(it.text) and not LETTER_MARK.match(it.text))
+
+        # (and the footnotes are below all of it: not a margin note beside it, nor a line of text
+        # Vision ran across the columns, p. 523)
+        text_end = max((max(l.box.y1 for l in g) for it, g in below if text_type(it, g)), default=None)
+        for it, g in below:
+            if text_type(it, g) or (text_end is not None and min(l.box.y0 for l in g) < text_end - 0.5 * layout.line_height):
+                continue
+            it.label = "footnotes (below the text)"
     # and by their reference marks, in the lower part of the page (a page the layout left as one
     # block has no columns to be below: p. 445)
     marked = [it for it in items if it.kind in ("paragraph", "note")

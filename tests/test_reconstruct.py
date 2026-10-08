@@ -188,6 +188,63 @@ def test_a_paragraph_ends_where_another_items_text_it_repeats_begins():
     assert items[1].text == tail
 
 
+def test_a_headword_vision_read_apart_from_its_line_joins_the_rest_of_its_paragraph():
+    from pdf_ocr_bench.reconstruct import column_parts
+
+    layout = _layout()
+    lines = [Line("L1", "ABIMELECH.", Box(140, 100, 420, 130), [], "column0"),
+             Line("L2", "The Prieft of the", Box(470, 100, 880, 130), [], "column0"),
+             Line("L3", "Lord, who gave Goliath's Sword to Da-", Box(100, 140, 880, 170), [], "column0"),
+             Line("L4", "vid, at the time when this Prince was", Box(100, 180, 880, 210), [], "column0")]
+    answer = {"items": [
+        {"zone": "column0", "kind": "paragraph", "lines": ["L2"], "text": "ABIMELECH. The Priest of the"},
+        {"zone": "column0", "kind": "paragraph", "lines": ["L1", "L3", "L4"],
+         "text": "Lord, who gave Goliath's Sword to David, at the time when this Prince was flying."},
+    ]}
+    items = to_items(answer, lines, layout)
+    assert len(items) == 1 and items[0].text.startswith("ABIMELECH. The Priest of the Lord, who gave")
+    assert sorted(items[0].lines) == ["L1", "L2", "L3", "L4"]
+    # one column, though "The Priest" starts far right of the headword
+    assert len(column_parts(items[0], lines, 25)) == 1
+
+
+def test_a_word_far_from_the_paragraph_it_was_given_to_is_no_part_of_it():
+    layout = _layout()
+    lines = [Line("A1", "the Eaft of the Garden of Eden, Cheru-", Box(100, 100, 880, 130), [], "column0"),
+             Line("B0", "In", Box(800, 140, 880, 170), [], "column0"),
+             Line("A2", "bims, and a flaming Sword which turned", Box(100, 140, 780, 170), [], "column0"),
+             Line("A3", "every where, to keep the way of the Tree", Box(100, 180, 880, 210), [], "column0"),
+             Line("A4", "of Life. Adam and Eve continued long.", Box(100, 220, 880, 250), [], "column0"),
+             Line("B1", "In fome little time after Eve conceiv-", Box(100, 400, 880, 430), [], "column0"),
+             Line("B2", "ed, and brought forth Cain, faying, I have", Box(100, 440, 880, 470), [], "column0"),
+             Line("B3", "gotten a Man from the Lord.", Box(100, 480, 600, 510), [], "column0")]
+    answer = {"items": [
+        {"zone": "column0", "kind": "paragraph", "lines": ["A1", "A2", "A3", "A4"],
+         "text": "the East of the Garden of Eden, Cherubims, and a flaming Sword which turned every where, to keep "
+                 "the way of the Tree of Life. Adam and Eve continued long."},
+        {"zone": "column0", "kind": "paragraph", "lines": ["B0", "B1", "B2", "B3"],
+         "text": "In some little time after Eve conceived, and brought forth Cain, saying, I have gotten a Man from the Lord."},
+    ]}
+    items = to_items(answer, lines, layout)
+    assert items[1].lines == ["B1", "B2", "B3"]
+
+
+def test_a_paragraph_listed_out_of_order_in_another_band_of_its_column_is_one_part():
+    from pdf_ocr_bench.reconstruct import column_parts
+
+    rows = [("A1", "IV. JOASH, the fon of Ahaziah king", 140, 100, "column0"),
+            ("A2", "of Judah. When the impious Athaliah", 100, 140, "column0"),
+            ("A4", "the feventh year, Jehoiada procured him", 100, 260, "column2"),
+            ("A5", "to be fecretly acknowledged King by the", 100, 300, "column2"),
+            ("A6", "principal Officers, who had the care of", 100, 340, "column2"),
+            ("A3", "There he abode fix years: but in", 260, 220, "text3")]  # indented, listed late
+    lines = [Line(i, t, Box(x0, y, 880, y + 30), [], z) for i, t, x0, y, z in rows]
+    text = ("IV. JOASH, the son of Ahaziah king of Judah. When the impious Athaliah There he abode six years: "
+            "but in the seventh year, Jehoiada procured him to be secretly acknowledged King by the principal "
+            "Officers, who had the care of")
+    assert len(column_parts(Item("column0", text, [l.id for l in lines]), lines, 25)) == 1
+
+
 def test_a_note_read_only_from_its_last_line_starts_where_its_first_was_printed():
     from pdf_ocr_bench.reconstruct import _lead_words
 

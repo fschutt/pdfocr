@@ -18,6 +18,7 @@ import re
 import threading
 from collections import Counter
 from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 
 from . import claude_cli
@@ -114,6 +115,7 @@ def to_items(answer: dict, lines: list, layout: PageLayout):
     lines_of = {k: [i for i in dict.fromkeys(a.get("lines", [])) if i in known and owner[i] == k]
                 for k, a in enumerate(answered)}
     _reassign(lines_of, answered, known)
+    _drop_strays(lines_of, known)
     items, used = [], set()
     for k, a in enumerate(answered):
         ids = lines_of[k]
@@ -128,6 +130,7 @@ def to_items(answer: dict, lines: list, layout: PageLayout):
                           drop_cap=(a.get("drop_cap") or "")[:1], align=a.get("align") or "justify",
                           italic=bool(a.get("italic")), label=str(a.get("zone") or "")))
     _trim_repeated(items, known)
+    _join_split(items, known)
     # lines the answer left out: fine when they are a little junk, not when text went missing
     missing = sum(len(l.text) for i, l in known.items() if i not in used)
     total = sum(len(l.text) for l in lines) or 1
@@ -174,6 +177,30 @@ def _trim_repeated(items: list, known: dict) -> None:
             break
 
 
+def _join_split(items: list, known: dict) -> None:
+    """A paragraph of a line or two that ends mid-sentence, and the next paragraph, on one printed
+    row with it, are one paragraph: Vision read the first line in two pieces (the headword and
+    the rest), and the model made "ABIMELECH. The Priest of the" an item and "Lord, who gave
+    Goliath's Sword ..." another, with the headword's line; both were set at that row (p. 35,
+    p. 792)."""
+    from .reconstruct import plain
+
+    k = 0
+    while k + 1 < len(items):
+        a, b = items[k], items[k + 1]
+        la = [known[i] for i in a.lines if i in known]
+        lb = [known[i] for i in b.lines if i in known]
+        end = plain(a.text).rstrip().rstrip("\"'\u201d\u2019)")
+        if (a.kind == b.kind == "paragraph" and "foot" not in (a.label + b.label).lower() and la and lb
+                and len(la) <= 2 and end and end[-1] not in ".!?:;"
+                and any(abs(x.box.y0 - y.box.y0) < 0.5 * max(x.box.h, 1) and min(x.box.x1, y.box.x1) < max(x.box.x0, y.box.x0)
+                        and x.zone == y.zone for x in la for y in lb)):
+            items[k] = replace(a, text=a.text.rstrip() + " " + b.text.lstrip(), lines=a.lines + [i for i in b.lines if i not in a.lines])
+            del items[k + 1]
+            continue
+        k += 1
+
+
 def _pairs(text: str) -> set[tuple[str, str]]:
     words = re.findall(r"\w+", text.lower().replace("ſ", "s").replace("f", "s"))
     return set(zip(words, words[1:]))
@@ -181,7 +208,7 @@ def _pairs(text: str) -> set[tuple[str, str]]:
 
 def _reassign(lines_of: dict[int, list[str]], answered: list[dict], known: dict) -> None:
     """A line the answer gives an item whose text has next to none of it (under 30% of its pairs
-    of words), when one other item's text has most of it (60%), goes to that one: the line ids of
+    of words), when one other item's text has most of it (60%, or 50% and no other 30%), goes to that one: the line ids of
     a page may be off by a line or two (p. 41 of vol. 1: its first lines given to the running
     head, and two paragraphs a line each in turn), the text the model read is right. It goes
     after that item's nearest line above it in its zone (the item's order: its column first)."""
@@ -198,7 +225,10 @@ def _reassign(lines_of: dict[int, list[str]], answered: list[dict], known: dict)
             if own >= 0.3:
                 continue
             scores = sorted(((len(pairs & t) / len(pairs), j) for j, t in enumerate(texts) if j != k), reverse=True)
-            if scores and scores[0][0] >= 0.6 and (len(scores) == 1 or scores[1][0] < 0.6):
+            # (or half of it, no other item a third: OCR misreads and a word hyphenated at the
+            # line's start, "zon like the other Stais", p. 41)
+            runner_up = scores[1][0] if len(scores) > 1 else 0.0
+            if scores and ((scores[0][0] >= 0.6 and runner_up < 0.6) or (scores[0][0] >= 0.5 and runner_up < 0.3)):
                 moves.append((i, k, scores[0][1]))
     for i, k, j in moves:
         lines_of[k].remove(i)
@@ -206,6 +236,39 @@ def _reassign(lines_of: dict[int, list[str]], answered: list[dict], known: dict)
         above = [n for n, m in enumerate(lines_of[j]) if known[m].zone == line.zone and known[m].box.y0 <= line.box.y0]
         at = max(above, key=lambda n: known[lines_of[j][n]].box.y0) + 1 if above else 0
         lines_of[j].insert(at, i)
+
+
+def _drop_strays(lines_of: dict[int, list[str]], known: dict) -> None:
+    """A line of a word or two the answer gives an item, printed far from the item's other lines
+    in its column with another item's lines between, is no part of it (it would set the item's
+    top there): a fragment ("In", ten lines above the paragraph it was given to, p. 58), the
+    running head (p. 41)."""
+    owner = {i: k for k, ids in lines_of.items() for i in ids}
+    for k, ids in lines_of.items():
+        if len(ids) < 3:
+            continue
+        heights = sorted(known[i].box.h for i in ids)
+        h = heights[len(heights) // 2]
+        strays = []
+        for i in ids:
+            line = known[i]
+            if len(line.text.split()) > 2:
+                continue
+
+            def beside(o) -> bool:  # in its column (overlapping it across)
+                return min(o.box.x1, line.box.x1) > max(o.box.x0, line.box.x0)
+
+            rest = [known[j] for j in ids if j != i and beside(known[j])]
+            if not rest:
+                continue  # alone in its column: a part of its own
+            near = min(rest, key=lambda o: abs(o.box.y0 - line.box.y0))
+            if abs(near.box.y0 - line.box.y0) <= 4 * h:
+                continue
+            lo, hi = sorted((near.box.y0, line.box.y0))
+            if any(owner.get(j, k) != k and lo < o.box.y0 < hi and beside(o) for j, o in known.items()):
+                strays.append(i)
+        for i in strays:
+            ids.remove(i)
 
 
 def _shared_pairs(line: str, text: str) -> int:
