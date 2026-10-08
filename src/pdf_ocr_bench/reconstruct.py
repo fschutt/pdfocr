@@ -722,6 +722,12 @@ def locate(text: str, lines: list[Line], lh: float) -> tuple[Box, list] | None:
         else max(2, 0.4 * n_words)
     if best is None or best_n < enough:
         return None
+    # (a note with a name, found by its name: "6." and "2" of the text's "li. 6. 3. 2" are not
+    # "2 Cor. ix. 6.", set over the paragraph, p. 316)
+    def name(k: str) -> bool:
+        return len(k) >= 3 and k.isalpha() and not re.fullmatch(r"[ivxlc]+", k)
+    if any(name(k) for k in want) and not any(name(k) for k, _, _ in best_m):
+        return None
     # on that line, the longest run of its words (a gap of one word allowed): "Ch. iv. 14, 15" at
     # the line's start, not every "14" in the text beside it
     keys = dict(want)
@@ -1166,6 +1172,8 @@ def page_zones(layout: PageLayout) -> list[Zone]:
     lh = layout.line_height
     out = []
     for z in layout.zones:
+        if z.role == "notes" and z.box.w < lh:
+            continue  # a rule between two columns, no strip of notes (2-7 pt wide, p. 897)
         if z.role == "notes":
             band = [o for o in layout.zones if o.role in ("column", "notes") and o is not z
                     and min(o.box.y1, z.box.y1) - max(o.box.y0, z.box.y0) > 0.5 * min(o.box.h, z.box.h)]
@@ -1253,6 +1261,12 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
     px = width_pt / layout.width  # pt per native px
     items = [replace(it) for it in items]  # their lines may be set below
     layout = replace(layout, zones=page_zones(layout))
+    # (a line in a zone left out there: in the nearest text zone)
+    kept = {z.id for z in layout.zones}
+    text_zones = [z for z in layout.zones if z.role in TEXT_ROLES]
+    if text_zones:
+        lines = [l if l.zone in kept else replace(l, zone=min(
+            text_zones, key=lambda z: _distance(z.box, (l.box.x0 + l.box.x1) / 2, (l.box.y0 + l.box.y1) / 2)).id) for l in lines]
     made, floating = place_lineless(items, lines, layout)
     lines = lines + made
     by_id = {l.id: l for l in lines}
@@ -1346,9 +1360,11 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
         note_margin[key] = (x0s[len(x0s) // 2], x1s[-1])
     # the page's columns as printed: the spans (where most lines start and end) of its paragraphs of
     # three printed lines or more, grouped where they overlap; each column's measure is the median
-    # of its spans. Zones do not say it: the layout may cut a column in two, leave two columns one
+    # of its spans, by their printed lines (a short paragraph Vision ran a column of notes into has
+    # less say than a long one printed clear of them: of two of each, 1772 for 1694, p. 702). Zones
+    # do not say it: the layout may cut a column in two, leave two columns one
     # band, or take in a note margin; and Vision runs lines across the gutter.
-    spans: list[tuple[float, float]] = []
+    spans: list[tuple[float, float, int]] = []
     spans_at: list[tuple[float, float, float, float]] = []  # and how far down the page each runs
     for it in items:
         if it.kind != "paragraph" or "foot" in it.label.lower():
@@ -1361,19 +1377,28 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
             e0, e1 = text_edges(ink, e0, e1, min(l.box.y0 for l in g), max(l.box.y1 for l in g), layout.line_height, n_rows,
                                 [w for l in g for w in l.words], part.text)
             if n_rows >= 3 and len(plain(part.text)) <= 2 * sum(len(l.text) for l in g) and e1 - e0 > 4 * layout.line_height:
-                spans.append((e0, e1))
+                spans.append((e0, e1, n_rows))
                 spans_at.append((e0, e1, min(l.box.y0 for l in g), max(l.box.y1 for l in g)))
-    clusters: list[list[tuple[float, float]]] = []
-    for e0, e1 in sorted(spans, key=lambda sp: (sp[0] + sp[1]) / 2):
+    def weighted_median(values: list[tuple[float, int]]) -> float:
+        values = sorted(values)
+        half, run = sum(w for _, w in values) / 2, 0
+        for v, w in values:
+            run += w
+            if run >= half:
+                return v
+        return values[-1][0]
+
+    clusters: list[list[tuple[float, float, int]]] = []
+    for e0, e1, n in sorted(spans, key=lambda sp: (sp[0] + sp[1]) / 2):
         for c in clusters:
-            c0 = sorted(x for x, _ in c)[len(c) // 2]
-            c1 = sorted(x for _, x in c)[len(c) // 2]
+            c0 = sorted(x for x, _, _ in c)[len(c) // 2]
+            c1 = sorted(x for _, x, _ in c)[len(c) // 2]
             if min(e1, c1) - max(e0, c0) > 0.6 * min(e1 - e0, c1 - c0):
-                c.append((e0, e1))
+                c.append((e0, e1, n))
                 break
         else:
-            clusters.append([(e0, e1)])
-    columns_measured = [(sorted(x for x, _ in c)[len(c) // 2], sorted(x for _, x in c)[len(c) // 2]) for c in clusters]
+            clusters.append([(e0, e1, n)])
+    columns_measured = [(weighted_median([(x, n) for x, _, n in c]), weighted_median([(x, n) for _, x, n in c])) for c in clusters]
 
     def measure_for(e0: float, e1: float) -> tuple[float, float] | None:
         """The printed column a paragraph's lines (spanning e0..e1) belong to."""
@@ -1467,11 +1492,19 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
     lh = layout.line_height
     for line in (by_id[i] for i in sorted(floating)):
         z = zones.get(line.zone)
+        if z is not None and z.role == "header":
+            # one the model listed after the running head: in the margin of the column below the
+            # head, from its top (not over the head, p. 240)
+            below = [c for c in layout.zones if c.role in ("column", "text") and c.box.y0 >= z.box.y0]
+            if below:
+                z = min(below, key=lambda c: _distance(c.box, (line.box.x0 + line.box.x1) / 2, z.box.y1))
+                line.zone, line.box = z.id, Box(line.box.x0, z.box.y0, line.box.x1, z.box.y0 + line.box.h)
         if z is None or z.role not in ("column", "text"):
             continue
         cx = (line.box.x0 + line.box.x1) / 2
         near = [(e0, e1) for e0, e1, a, b in spans_at
-                if a - 3 * lh < line.box.y1 and line.box.y0 < b + 3 * lh and e0 < cx < e1]
+                if a - 3 * lh < line.box.y1 and line.box.y0 < b + 3 * lh and e0 < cx < e1] or \
+            [(e0, e1) for e0, e1 in columns_measured if e0 < cx < e1]  # (its column as printed elsewhere)
         e0, e1 = near[0] if near else (line.box.x0, line.box.x1)
         # (the outer side of its column's text as printed: its zone may take in more of the page)
         outside = "right" if (e0 + e1) / 2 > layout.width / 2 else "left"
@@ -1655,13 +1688,15 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
                 if min(ny1, gy1) - max(ny0, gy0) < 0.5 * layout.line_height or nx1 < left or nx0 > right:
                     continue  # not beside this paragraph
                 # (and its lines mostly printed clear of it: a note's extent that took in a word of
-                # the text beside it reached 130 pt into it, p. 37)
+                # the text beside it reached 130 pt into it, p. 37. Half a line off it, or out to
+                # where its lines are printed, never into it: p. 702's lines end 4 pt short of a
+                # note's box, p. 605's run 15 pt into one whose box starts too far in)
                 if (nx0 + nx1) / 2 < left + 0.3 * (right - left):
                     if row_x0 >= nx1 - layout.line_height:
-                        left = nx1 + 0.5 * layout.line_height
+                        left = max(left, min(nx1 + 0.5 * layout.line_height, max(row_x0, nx1)))
                 elif (nx0 + nx1) / 2 > right - 0.3 * (right - left):
                     if row_x1 <= nx0 + layout.line_height:
-                        right = nx0 - 0.5 * layout.line_height
+                        right = min(right, max(nx0 - 0.5 * layout.line_height, min(row_x1, nx0)))
             if right - left < 0.5 * zone.box.w and right - left < 0.5 * (ex1 - ex0):
                 # not a margin: the notes took most of it (a column: its own measure)
                 left, right = (zone.box.x0, zone.box.x1) if zone.role in ("column", "text") else (ex0, ex0 + 1.02 * (ex1 - ex0))
