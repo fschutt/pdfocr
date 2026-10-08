@@ -2259,6 +2259,10 @@ def fit_round(target: Path, page_blocks: dict[int, list[Block]], pages_meta: lis
             # text may reach half a line into the next block (its first line's OCR box is a few
             # px higher or lower than where its line box begins), never past the page
             slack = 0.0 if block.limit >= report["height_pt"] - 1 else 0.5 * block.line_h
+            if any(o.item.kind == "heading" and abs(o.y - block.limit) < 1.0 for o in regions):
+                # (not into a heading: the footnotes' last row over the signature "VOL. I." at the
+                # page's foot, p. 432)
+                slack = 0.15 * block.line_h
             if rendered["y1"] > block.limit + slack:
                 # fewer, smaller lines (a smaller heading line): the ratio of the room to what it took
                 took = max(rendered["y1"] - block.y, 1.0)
