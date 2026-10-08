@@ -2188,6 +2188,7 @@ def fit_round(target: Path, page_blocks: dict[int, list[Block]], pages_meta: lis
             continue
         regions = [b for b in page_blocks[p["page_num"]] if b.item is not None]
         drawn = [m.get("rendered") for m in report["regions"]]
+        crowded: set[int] = set()  # the notes of a margin set smaller this round
         # (by size and area: margin notes of the text's size that run over do not set the text smaller)
         groups: dict[tuple[float, str], list[tuple[Block, float]]] = {}
         # a paragraph that runs a line or two into the block below it in its column moves that one
@@ -2243,6 +2244,20 @@ def fit_round(target: Path, page_blocks: dict[int, list[Block]], pages_meta: lis
                         block.size *= factor
                         _follow_size(block)
                     shrunk[p["page_num"]] = shrunk.get(p["page_num"], 0) + 1
+                    continue
+                if above and block.y + 0.5 < max(above) + 0.2 * block.size and id(block) not in crowded:
+                    # no room at all below the note above (the margin's notes reach the page's end,
+                    # the last two one over the other, p. 812): every note of the margin a step
+                    # smaller, so they take less of it
+                    margin = [o for o in regions if o.item.kind == "note" and "foot" not in o.item.label.lower()
+                              and min(o.x + o.w, block.x + block.w) - max(o.x, block.x) > 0.5 * min(o.w, block.w)]
+                    # (15% at most: past that, their places are wrong, not their size)
+                    for o in margin:
+                        crowded.add(id(o))
+                        if o.size * 0.95 >= 0.85 * o.start_size:
+                            o.size *= 0.95
+                            _follow_size(o)
+                    shrunk[p["page_num"]] = shrunk.get(p["page_num"], 0) + len(margin)
                     continue
                 end = min(block.limit, report["height_pt"])
                 wide = rendered["x1"] > block.x + block.w + 0.25 * block.size
