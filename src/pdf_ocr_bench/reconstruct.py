@@ -2336,7 +2336,10 @@ def fit_round(target: Path, page_blocks: dict[int, list[Block]], pages_meta: lis
                     room_lines = int((b.limit - b.y) / max(b.line_h, 1.0) + 0.15)
                     own = fit_size(plain(b.item.text), 0.97 * b.w, max(room_lines, 1), b.size, _times(b.item.italic), b.indent)
                     size = min(0.98 * b.size, own)
-                    if room_lines >= 1 and size >= 0.94 * level:
+                    # (10% for a paragraph of ten printed lines and more: its room is what they
+                    # took, and the estimate breaks no word where azul hyphenates, p. 1046)
+                    least = 0.9 if b.fit and b.fit[0] >= 10 else 0.94
+                    if room_lines >= 1 and size >= least * level:
                         b.size = size
                         _follow_size(b)
                         shrunk[p["page_num"]] = shrunk.get(p["page_num"], 0) + 1

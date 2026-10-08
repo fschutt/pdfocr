@@ -30,6 +30,8 @@ LIGATURES = ("ſſi", "ſſl", "ffi", "ffl", "ſſ", "ſt", "ſi", "ſl", "ſh",
 # the ligatures the compositor set as a rule (vol. 1: joined some 5 to 10 times for each time apart;
 # ſi was set apart four times in five)
 SET_LIGATURES = ("ffi", "ffl", "ff", "fi", "fl", "ct", "ſſi", "ſſ", "ſt", "ſl", "ſh")
+# letters set as one piece that the prints may not give: of their two letters
+COMPOSED = {"æ": "ae", "œ": "oe", "Æ": "AE", "Œ": "OE"}
 # a long s before any letter but these (and round at a word's end, before an apostrophe): vol. 1,
 # 757,519 words: before f 0 long of 177, b 6 of 152, k 5 of 287; at the end 188 of 78,061
 ROUND_S_BEFORE = "fbk"
@@ -705,6 +707,7 @@ def build_font(style: str, shapes_: dict, metrics_: dict, family: str, path: Pat
     hmtx["space"] = (round(space), 0)
     advances[" "] = space / UPM
     svgs = []
+    outlines: dict[str, tuple] = {}  # glyph: (contours, left bearing, ink width, advance), font units
     for c, (src_style, canvas) in sorted(sources.items()):
         binary = canvas > 0.5
         cols = np.flatnonzero(binary.any(axis=0))
@@ -738,6 +741,58 @@ def build_font(style: str, shapes_: dict, metrics_: dict, family: str, path: Pat
         if len(c) == 1 and c != "ſ":
             cmap[ord(c)] = name
         svgs.append((name, c, svg_path(fixed), advance))
+        outlines[c] = (fixed, left * UPM, width * UPM, advance)
+    # what the prints do not give. The quotation marks the model writes curly and Vision reads
+    # straight (vol. 1: "“" 741 times; the prints of '"' average to one mark): the apostrophe (a
+    # raised comma: ’), turned (‘), two of them (” “). "æ", "œ" (2215 and 230 times; Vision reads
+    # one as a single letter some ten times in the volume): their two letters closed up to the
+    # width measured, else by 0.06 em. The dashes: the hyphen drawn out to an em, an en.
+    made = []
+    if "'" in outlines:
+        pq, lq, wq, adv_q = outlines["'"]
+        ys = [y for pts in pq for _, y, _ in pts]
+        cx, cy = lq + wq / 2, (min(ys) + max(ys)) / 2
+        turned = [[(2 * cx - x, 2 * cy - y, on) for x, y, on in pts] for pts in pq]
+        gap = 0.06 * UPM
+        for c, mark in (("’", pq), ("‘", turned)):
+            made.append((c, mark, adv_q))
+        for c, mark in (("”", pq), ("“", turned)):
+            made.append((c, mark + [[(x + wq + gap, y, on) for x, y, on in pts] for pts in mark], adv_q + wq + gap))
+        made = [e for e in made if ord(e[0]) not in cmap]
+
+    def measured_width(c: str) -> float | None:  # (from a few prints at least: one "—" measured 0.32 em)
+        info = m["glyphs"].get(c) or {}
+        return info.get("width") if info.get("count", 0) >= 5 else None
+
+    for c, (a, b) in COMPOSED.items():
+        if ord(c) in cmap or a not in outlines or b not in outlines:
+            continue
+        (pa, la, wa, _), (pb, lb, wb, adv_b) = outlines[a], outlines[b]
+        measured = measured_width(c)
+        overlap = (wa + wb - measured * UPM) if measured else 0.06 * UPM
+        overlap = min(max(overlap, 0.0), 0.5 * min(wa, wb))
+        dx = la + wa - overlap - lb
+        made.append((c, pa + [[(x + dx, y, on) for x, y, on in pts] for pts in pb], dx + adv_b))
+    if "-" in outlines:
+        ph, lh_, wh, _ = outlines["-"]
+        for c, ink in (("—", 0.9), ("–", 0.45)):
+            if ord(c) in cmap:
+                continue
+            ink = (measured_width(c) or ink) * UPM
+            sx = ink / max(wh, 1.0)
+            made.append((c, [[(lh_ + (x - lh_) * sx, y, on) for x, y, on in pts] for pts in ph],
+                         2 * lh_ + ink))
+    for c, contours, advance in made:
+        pen = TTGlyphPen(None)
+        draw(pen, [[(round(x), round(y), on) for x, y, on in pts] for pts in contours])
+        name = glyph_name(c)
+        glyphs[name] = pen.glyph()
+        x_min = min((x for pts in contours for x, _, _ in pts), default=0)
+        hmtx[name] = (max(round(advance), 1), round(x_min))
+        glyph_order.append(name)
+        advances[c] = round(advance) / UPM
+        cmap[ord(c)] = name
+        svgs.append((name, c, svg_path(contours), round(advance)))
     fb = FontBuilder(UPM, isTTF=True)
     fb.setupGlyphOrder(glyph_order)
     fb.setupCharacterMap(cmap)

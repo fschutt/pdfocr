@@ -90,3 +90,20 @@ def test_the_shaper_measures_the_long_s_ligatures_and_kerns_the_renderer_sets(tm
     assert shaper.text_length("tos", 10) == pytest.approx(10 * (0.28 + 0.40 - 0.05 + 0.30), abs=0.02)  # kern, round s
     assert shaper.text_length("so", 10) == pytest.approx(10 * (0.25 + 0.40), abs=0.02)  # long s before o
     assert shaper.text_length("o!", 10) == pytest.approx(10 * 0.40 + times.text_length("!", 10), abs=0.02)  # fallback
+
+
+def test_what_the_prints_do_not_give_is_made_of_what_they_do(tmp_path):
+    from fontTools.ttLib import TTFont
+
+    canvas = np.zeros(T.CANVAS, dtype=np.float32)
+    canvas[T.BASE_ROW - 60:T.BASE_ROW, T.MID_COL - 20:T.MID_COL + 20] = 1.0
+    chars = {"a": 0.40, "e": 0.36, "'": 0.10, "-": 0.30}
+    shapes = {("roman", c): (canvas, 100) for c in chars}
+    metrics = {"roman": {"glyphs": {c: {"width": w, "bottom": 0.0, "top": 0.45, "count": 100, "left": 0.02, "right": 0.02}
+                                    for c, w in chars.items()} | {"æ": {"width": 0.70, "count": 9, "bottom": 0.0, "top": 0.45}},
+                         "kerns": {}, "spaces": {"space": 0.25}}}
+    advances = T.build_font("roman", shapes, metrics, "Test", tmp_path / "Test-Regular.ttf")
+    cmap = TTFont(tmp_path / "Test-Regular.ttf").getBestCmap()
+    assert all(ord(c) in cmap for c in "æ“”‘’—–")
+    assert advances["æ"] == pytest.approx(0.02 + 0.70 + 0.02, abs=0.01)  # closed up to the width measured
+    assert advances["—"] > 2 * advances["–"] - 0.1 > advances["-"]
