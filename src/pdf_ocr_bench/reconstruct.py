@@ -1466,6 +1466,10 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
         gap, reach = 0.5 * lh_, 12 * lh_  # (a column's measure runs 1% past its lines)
         spans = [(z.box.x0, z.box.x1) for z in layout.of("notes")] + [(nt[0], nt[2]) for nt in seen_notes]
         columns = [(e0, e1) for e0, e1, a, b in spans_at if a - 3 * lh_ < bottom and top < b + 3 * lh_] or columns_measured
+        # (narrower than its column's measure, not wider: the span of a paragraph whose lines Vision
+        # ran into the notes beside them reached 70 pt into them, p. 823)
+        columns = [next(((max(e0, m0), min(e1, m1)) for m0, m1 in columns_measured
+                         if min(e1, m1) - max(e0, m0) > 0.5 * (m1 - m0)), (e0, e1)) for e0, e1 in columns]
         centre = (left + right) / 2
         beside = [(m0 - centre, "left", m0) for m0, _ in columns if m0 - reach < centre < m0] + \
                  [(centre - m1, "right", m1) for _, m1 in columns if m1 < centre < m1 + reach]
