@@ -1990,6 +1990,29 @@ def fit_round(target: Path, page_blocks: dict[int, list[Block]], pages_meta: lis
                     if block.level:
                         groups.setdefault((block.level, block.area), []).append((block, 1.0))
                     continue
+                room = min(block.limit, report["height_pt"]) - (max(above, default=0.0) + 0.2 * block.size) - 0.3 * block.line_h
+                if above and block.y + 0.5 < max(above) + 0.2 * block.size and room > block.line_h:
+                    # no room below it for all of it (a margin of notes as long as the page, p. 245):
+                    # below the note above all the same, and this one set smaller, to the room left
+                    # (one note a step smaller rather than two notes one over the other)
+                    took = max(rendered["y1"] - block.y, 1.0)
+                    block.y = max(above) + 0.2 * block.size
+                    factor = max(0.85, min(0.97, room / took))
+                    if block.size * factor >= MIN_FIT * block.start_size:
+                        block.size *= factor
+                        _follow_size(block)
+                    shrunk[p["page_num"]] = shrunk.get(p["page_num"], 0) + 1
+                    continue
+                end = min(block.limit, report["height_pt"])
+                if not above and rendered["y1"] > end - 0.1 * block.line_h and end - block.y - 0.3 * block.line_h > block.line_h:
+                    # and one so moved that runs past the page's end (or the footnotes) a step smaller
+                    # still, by itself (its group's other notes have their room)
+                    factor = max(0.85, min(0.97, (end - block.y - 0.3 * block.line_h) / max(rendered["y1"] - block.y, 1.0)))
+                    if block.size * factor >= MIN_FIT * block.start_size:
+                        block.size *= factor
+                        _follow_size(block)
+                        shrunk[p["page_num"]] = shrunk.get(p["page_num"], 0) + 1
+                    continue
             ratio = 1.0
             # text may reach half a line into the next block (its first line's OCR box is a few
             # px higher or lower than where its line box begins), never past the page
