@@ -71,3 +71,22 @@ def test_a_traced_glyph_becomes_a_font(tmp_path):
     assert glyph.numberOfContours == 2
     assert font["hmtx"]["o"][0] == round(1000 * (0.04 + 60 / T.EM_PX))
     assert (tmp_path / "svg" / "roman-006F.svg").exists()
+
+
+def test_the_shaper_measures_the_long_s_ligatures_and_kerns_the_renderer_sets(tmp_path):
+    import pymupdf
+
+    canvas = np.zeros(T.CANVAS, dtype=np.float32)
+    canvas[T.BASE_ROW - 60:T.BASE_ROW, T.MID_COL - 20:T.MID_COL + 20] = 1.0
+    widths = {"s": 0.30, "ſ": 0.25, "t": 0.28, "ſt": 0.45, "o": 0.40}
+    shapes = {("roman", c): (canvas, 100) for c in widths}
+    metrics = {"roman": {"glyphs": {c: {"width": w, "bottom": 0.0, "top": 0.45, "count": 100, "left": 0.0, "right": 0.0}
+                                    for c, w in widths.items()},
+                         "kerns": {"to": -0.05}, "spaces": {"space": 0.25}}}
+    T.build_font("roman", shapes, metrics, "Test", tmp_path / "Test-Regular.ttf")
+    times = pymupdf.Font("tiro")
+    shaper = T.Shaper(tmp_path / "Test-Regular.ttf", times)
+    assert shaper.text_length("sto", 10) == pytest.approx(10 * (0.45 + 0.40), abs=0.02)  # ſt + o
+    assert shaper.text_length("tos", 10) == pytest.approx(10 * (0.28 + 0.40 - 0.05 + 0.30), abs=0.02)  # kern, round s
+    assert shaper.text_length("so", 10) == pytest.approx(10 * (0.25 + 0.40), abs=0.02)  # long s before o
+    assert shaper.text_length("o!", 10) == pytest.approx(10 * 0.40 + times.text_length("!", 10), abs=0.02)  # fallback

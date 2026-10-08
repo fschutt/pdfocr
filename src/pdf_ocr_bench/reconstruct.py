@@ -41,6 +41,7 @@ from pathlib import Path
 
 from .log import get_logger
 from .page_layout import Box, PageLayout, Zone, analyse, draw
+from .typeface import Shaper
 
 log = get_logger("Reconstruct")
 
@@ -426,8 +427,9 @@ def _times(italic: bool = False):
 
     key = "italic" if italic else "roman"
     if key not in _FONTS:
-        _FONTS[key] = (pymupdf.Font(fontfile=str(TYPEFACE["files"][key])) if TYPEFACE
-                       else pymupdf.Font("tiit" if italic else "tiro"))  # Times-Italic / Times-Roman
+        times = pymupdf.Font("tiit" if italic else "tiro")  # Times-Italic / Times-Roman
+        # (the book's shaped, as the renderer sets it: its long s, ligatures and kerns)
+        _FONTS[key] = Shaper(TYPEFACE["files"][key], times) if TYPEFACE else times
     return _FONTS[key]
 
 
@@ -1525,8 +1527,14 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
             measure = measure_for(ex0, ex1) if len(rows) >= 2 or zone.role in ("column", "text") else None
             if measure is not None:
                 # the column's text measure, as its paragraphs are printed (its zone may take in a
-                # note margin, or the gutter)
+                # note margin, or the gutter); out to its own lines where they are printed a little
+                # wider (a scan is skewed or curved: the column ends at 1662 here, at 1675 there,
+                # and a short entry took a line more than printed, p. 608)
                 left, right = measure
+                if ex1 > right and ex1 - right <= 0.03 * (right - left):
+                    right = ex1
+                if ex0 < left and left - ex0 <= 0.03 * (right - left):
+                    left = ex0
             # a measure from its lines needs two printed lines (one is often a fragment the OCR read
             # of a paragraph whose text the model read from the scan: a 57 px "in" on p. 995)
             one_line = len(rows) == 1 and zone.role in ("column", "text")
@@ -1549,14 +1557,16 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
             # (within the text's own edges and its column's measure: where notes Vision ran into half
             # its lines end, p. 605)
             row_x0, row_x1 = max(row_x0, ex0, left), min(row_x1, ex1, right)
+            # (a margin half a line off the notes, but never inside where its own lines are printed:
+            # "and wife of Aaron." printed 13 pt into it took a line more, over the next entry, p. 608)
             if (zone.id, "left") in margin_of:
                 m = margin_of[(zone.id, "left")][1] + 0.5 * layout.line_height
                 if row_x0 >= m - layout.line_height:
-                    left = max(left, m)
+                    left = max(left, min(m, row_x0))
             if (zone.id, "right") in margin_of:
                 m = margin_of[(zone.id, "right")][0] - 0.5 * layout.line_height
                 if row_x1 <= m + layout.line_height:
-                    right = min(right, m)
+                    right = min(right, max(m, row_x1))
             # note strips the layout found inside the column's width count as its margin too (not
             # those its own lines stand in: the layout may cut a band of text into narrow strips)
             own_zones = {l.zone for l in group}
@@ -2148,6 +2158,21 @@ def fit_round(target: Path, page_blocks: dict[int, list[Block]], pages_meta: lis
             # whose room is wrong set the page's text 28% smaller, p. 280)
             r20 = ratios[min(len(ratios) - 1, max(1, int(0.2 * (len(ratios) - 1))))]
             if r20 >= 1.0:
+                # the size stays; a paragraph of it that the renderer breaks into a line more than
+                # its room has goes a step smaller by itself, when it fits its room a little smaller
+                # (azul at 42 pt: "Aaron." on a line of its own, the entry a line longer than
+                # printed, over the next, p. 608). Not more than 6% under the rest: else its room
+                # is wrong, not the size.
+                for b, r in members:
+                    if r >= 1.0 or b.item.kind != "paragraph" or b.nowrap:
+                        continue
+                    room_lines = int((b.limit - b.y) / max(b.line_h, 1.0) + 0.15)
+                    own = fit_size(plain(b.item.text), 0.97 * b.w, max(room_lines, 1), b.size, _times(b.item.italic), b.indent)
+                    size = min(0.98 * b.size, own)
+                    if room_lines >= 1 and size >= 0.94 * level:
+                        b.size = size
+                        _follow_size(b)
+                        shrunk[p["page_num"]] = shrunk.get(p["page_num"], 0) + 1
                 continue
             factor = max(0.85, min(0.97, r20))
             if members[0][0].size * factor < MIN_FIT * members[0][0].start_size:

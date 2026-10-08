@@ -791,6 +791,95 @@ def build_font(style: str, shapes_: dict, metrics_: dict, family: str, path: Pat
     return advances
 
 
+class Shaper:
+    """Widths of text as a shaper sets it in a font `build_font` made: its `calt` long s, its
+    ligatures, its kerns (PyMuPDF measures the characters of the cmap alone; azul shapes, and
+    a line PyMuPDF filled 2 pt short was a line too long for azul, p. 608). Characters the font
+    lacks are measured in `fallback` (a PyMuPDF font), as the renderer falls back to it."""
+
+    def __init__(self, path: Path, fallback):
+        import logging
+
+        from fontTools.ttLib import TTFont
+
+        # (the fonts have no dates: fontTools warns about it on every load)
+        logging.getLogger("fontTools.ttLib.tables._h_e_a_d").setLevel(logging.ERROR)
+        font = TTFont(str(path))
+        self.upm = font["head"].unitsPerEm
+        self.cmap = font.getBestCmap()
+        self.advance = {g: a for g, (a, _) in font["hmtx"].metrics.items()}
+        self.fallback = fallback
+        self.context = []  # (glyphs, glyphs after, {glyph: replacement}): calt
+        self.ligatures = {}  # first glyph -> [(the others, ligature)], longest first
+        self.kerns = {}  # (left, right) -> units
+        self._widths = {}
+        if "GSUB" in font:
+            lookups = font["GSUB"].table.LookupList.Lookup
+            for record in font["GSUB"].table.FeatureList.FeatureRecord:
+                for index in record.Feature.LookupListIndex:
+                    for st in lookups[index].SubTable:
+                        if record.FeatureTag == "calt" and getattr(st, "Format", None) == 3 and len(st.InputCoverage) == 1 \
+                                and not st.BacktrackCoverage and len(st.LookAheadCoverage) <= 1:
+                            subst = {}
+                            for rec in st.SubstLookupRecord:
+                                for single in lookups[rec.LookupListIndex].SubTable:
+                                    subst.update(single.mapping)
+                            after = set(st.LookAheadCoverage[0].glyphs) if st.LookAheadCoverage else None
+                            self.context.append((set(st.InputCoverage[0].glyphs), after, subst))
+                        elif record.FeatureTag == "liga" and hasattr(st, "ligatures"):
+                            for first, ligs in st.ligatures.items():
+                                self.ligatures.setdefault(first, []).extend((tuple(l.Component), l.LigGlyph) for l in ligs)
+            for ligs in self.ligatures.values():
+                ligs.sort(key=lambda e: -len(e[0]))
+        if "GPOS" in font:
+            for lookup in font["GPOS"].table.LookupList.Lookup:
+                for st in lookup.SubTable:
+                    if lookup.LookupType == 2 and st.Format == 1:
+                        for first, pairs in zip(st.Coverage.glyphs, st.PairSet):
+                            for rec in pairs.PairValueRecord:
+                                self.kerns[(first, rec.SecondGlyph)] = getattr(rec.Value1, "XAdvance", 0) or 0
+
+    def _width(self, text: str) -> float:
+        """`text`'s width at 1 pt."""
+        if text in self._widths:
+            return self._widths[text]
+        width, run = 0.0, []
+        for ch in text + "\0":
+            glyph = self.cmap.get(ord(ch))
+            if glyph is not None:
+                run.append(glyph)
+                continue
+            width += self._run(run)
+            run = []
+            if ch != "\0":
+                width += self.fallback.text_length(ch, 1.0)
+        self._widths[text] = width
+        return width
+
+    def _run(self, glyphs: list[str]) -> float:
+        """The width at 1 pt of glyphs of the font, shaped."""
+        glyphs = list(glyphs)
+        for inputs, after, subst in self.context:
+            glyphs = [subst.get(g, g) if g in inputs and (after is None or (i + 1 < len(glyphs) and glyphs[i + 1] in after))
+                      else g for i, g in enumerate(glyphs)]
+        out, i = [], 0
+        while i < len(glyphs):
+            for rest, lig in self.ligatures.get(glyphs[i], ()):
+                if tuple(glyphs[i + 1:i + 1 + len(rest)]) == rest:
+                    out.append(lig)
+                    i += 1 + len(rest)
+                    break
+            else:
+                out.append(glyphs[i])
+                i += 1
+        units = sum(self.advance.get(g, 0) for g in out) + sum(self.kerns.get(p, 0) for p in zip(out, out[1:]))
+        return units / self.upm
+
+    def text_length(self, text: str, fontsize: float = 1.0) -> float:
+        """As PyMuPDF's `Font.text_length`."""
+        return self._width(text) * fontsize
+
+
 def _contains(contour, point) -> bool:
     """Whether `point` (x, y, _) is inside the polygon of `contour`'s points (even-odd)."""
     x, y = point[0], point[1]
