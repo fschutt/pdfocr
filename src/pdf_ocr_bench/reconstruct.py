@@ -1033,12 +1033,25 @@ def text_edges(ink, e0: float, e1: float, y0: float, y1: float, lh: float, rows:
                 mine += 1
         return mine <= 0.3 * len(outside)
 
+    def step(order: list[int]) -> int | None:
+        # no valley (notes 6 pt off the text, a line of them beside each of its lines, p. 283):
+        # where the ink drops from the text's to the notes' (a line and a half of each)
+        for k in range(beyond, len(order) - beyond):
+            inner, outer = cols[order[k - beyond:k]].mean(), cols[order[k:k + beyond]].mean()
+            if inner >= 0.85 * body and outer <= 0.6 * body and cols[order[k:k + beyond]].min() > 0:
+                return order[k - 1]
+        return None
+
     w = len(cols)
     new0, new1 = e0, e1
     right = edge(list(range(w - reach, w)))
+    if right is None:
+        right = step(list(range(w - reach, w)))
     if right is not None and notes_beyond(a + right + 1, "right"):
         new1 = a + right + 1
     left = edge(list(range(reach, -1, -1)))
+    if left is None:
+        left = step(list(range(reach, -1, -1)))
     if left is not None and notes_beyond(a + left, "left"):
         new0 = a + left
     return new0, new1
@@ -1414,6 +1427,19 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
         if any(min(mx1, m1) - max(mx0, m0) > layout.line_height for m0, m1 in columns_measured):
             del margin_of[key]
             note_margin.pop(key, None)
+            continue
+        # (and starts half a line off the text: the notes' boxes Vision read may begin in the line
+        # ends beside them, 15 pt into the text, p. 283)
+        for m0, m1 in columns_measured:
+            if key[1] == "right" and m0 < mx0 < m1 + 0.5 * layout.line_height < mx1:
+                mx0 = m1 + 0.5 * layout.line_height
+            if key[1] == "left" and mx0 < m0 - 0.5 * layout.line_height < mx1 < m1:
+                mx1 = m0 - 0.5 * layout.line_height
+        if (mx0, mx1) != margin_of[key] and mx1 - mx0 >= 2 * layout.line_height:
+            margin_of[key] = (mx0, mx1)
+            if key in note_margin:
+                note_margin[key] = (max(note_margin[key][0], mx0), note_margin[key][1]) if key[1] == "right" \
+                    else (note_margin[key][0], min(note_margin[key][1], mx1))
     # the notes a paragraph keeps clear of: those the OCR read there, and those in a margin (one
     # placed by its words only where the paragraph's other lines stand clear of it: a "Luke" of
     # the text set the paragraph 267 pt narrower, in 37 lines for 22, p. 605)
@@ -1506,6 +1532,11 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
                 if a - 3 * lh < line.box.y1 and line.box.y0 < b + 3 * lh and e0 < cx < e1] or \
             [(e0, e1) for e0, e1 in columns_measured if e0 < cx < e1]  # (its column as printed elsewhere)
         e0, e1 = near[0] if near else (line.box.x0, line.box.x1)
+        # (as wide as its column's measure: a short paragraph beside it ends short of the long one
+        # beside its notes, and set them 15 pt into that one's text, p. 283)
+        for m0, m1 in columns_measured:
+            if m0 < cx < m1:
+                e0, e1 = min(e0, m0), max(e1, m1)
         # (the outer side of its column's text as printed: its zone may take in more of the page)
         outside = "right" if (e0 + e1) / 2 > layout.width / 2 else "left"
         sides = [side for (zid, side) in margin_of if zid == z.id]
