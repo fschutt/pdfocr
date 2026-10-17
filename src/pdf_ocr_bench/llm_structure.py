@@ -135,12 +135,43 @@ def to_items(answer: dict, lines: list, layout: PageLayout):
                           italic=bool(a.get("italic")), label=str(a.get("zone") or "")))
     _join_split(items, known)  # (before the trim: a trimmed paragraph ends mid-sentence)
     _trim_repeated(items, known)
+    _drop_doubled_notes(items)
     # lines the answer left out: fine when they are a little junk, not when text went missing
     missing = sum(len(l.text) for i, l in known.items() if i not in used)
     total = sum(len(l.text) for l in lines) or 1
     if missing > 0.15 * total:
         return None
     return items
+
+
+def _drop_doubled_notes(items: list) -> None:
+    """A note given twice, once with OCR lines and once without (read again from the scan): the one
+    without lines goes (it was placed by its words or under the note before it, a second copy beside
+    the first, p. 245)."""
+    import difflib
+
+    from .reconstruct import plain
+
+    from .reconstruct import _norm_word
+
+    def key(text: str) -> str:
+        return " ".join(k for k in (_norm_word(w) for w in plain(text).split()) if k)
+
+    def same(a: str, b: str) -> bool:
+        # (alike to the letter but for a misreading, and the same numbers and numerals: "Ibid. v. 3."
+        # and "Ibid. v. 5." are two notes, "Gen. xiv." and "Gen. xv." too)
+        if a == b:
+            return True
+        return len(a) >= 15 and a.split() and [w for w in a.split() if not w.isalpha() or len(w) <= 4] == \
+            [w for w in b.split() if not w.isalpha() or len(w) <= 4] and difflib.SequenceMatcher(None, a, b).ratio() > 0.9
+
+    with_lines = [key(it.text) for it in items if it.kind == "note" and it.lines]
+    for it in list(items):
+        if it.kind != "note" or it.lines:
+            continue
+        text = key(it.text)
+        if len(text) >= 6 and any(same(text, o) for o in with_lines):
+            items.remove(it)
 
 
 def _trim_repeated(items: list, known: dict) -> None:

@@ -443,3 +443,56 @@ def test_margin_words_are_the_words_vision_ran_into_a_column_from_its_margin():
     assert [(i, ws, f) for i, ws, f in found] == [("L2", ["Gen."], False), ("L3", ["xxii."], False)]
     answer["items"].append({"kind": "note", "lines": [], "text": "Gen. xxii."})
     assert all(f for _, _, f in margin_words(answer, lines, layout))
+
+
+def test_a_lone_piece_a_row_above_or_a_line_across_the_gutter_is_no_column_of_its_own():
+    from pdf_ocr_bench.reconstruct import column_parts
+
+    # a margin note's "De-" a row above the next lines of the paragraph, listed among them (p. 865)
+    rows = [("A1", "As foon as Athaliah was dead, and the", 1182, 2191, 2573), ("A2", "young Prince eftablifhed on the", 1126, 2172, 2629),
+            ("A3", "he ordered the Temple of Baal to be de-", 1126, 2215, 2685), ("A4", "De-", 2240, 2290, 2506),
+            ("A5", "molifhed, and his Statue broken in pieces.", 1126, 2190, 2740), ("A6", "The face of the Kingdom was quite", 1130, 2180, 2796)]
+    lines = [Line(i, t, Box(x0, y, x1, y + 45), [], "column1") for i, t, x0, x1, y in rows]
+    text = ("As soon as Athaliah was dead, and the young Prince established on the Throne, he ordered the Temple of "
+            "Baal to be demolished, and his Statue broken in pieces. The face of the Kingdom was quite changed")
+    parts = column_parts(Item("column1", text, [l.id for l in lines]), lines, 25)
+    assert len(parts) == 1 and "A4" not in parts[0][0].lines
+    # a line Vision ran over the gutter, listed first: twice as wide as the column's lines (p. 178)
+    rows = [("B1", "Strabo fays that the name of needle dip'd in a box of Paint made of", 440, 2190, 467),
+            ("B2", "As large black Eyes were thought the", 1315, 2186, 243), ("B3", "finest, they of both fexes, who were", 1265, 2186, 290),
+            ("B4", "careful of their beauty, rub'd their", 1265, 2186, 337), ("B5", "Eyes, the Eye-lids, and round the", 1265, 2186, 384)]
+    lines = [Line(i, t, Box(x0, y, x1, y + 45), [], "column1") for i, t, x0, x1, y in rows]
+    text = ("As large black Eyes were thought the finest, they of both sexes, who were careful of their beauty, "
+            "rub'd their Eyes, the Eye-lids, and round the Eyes, with a needle dip'd in a box of Paint made of")
+    assert len(column_parts(Item("column1", text, [l.id for l in lines]), lines, 25)) == 1
+
+
+def test_a_heading_printed_in_pieces_far_apart_is_split_even_where_a_piece_is_misread():
+    from pdf_ocr_bench.reconstruct import _heading_pieces
+
+    # "Jacob." read as "Расов.", its box taking in the brace above it (p. 953)
+    lines = [Line("L1", "Расов.", Box(484, 3218, 628, 3300), [], "column4"), Line("L2", "Elau.", Box(831, 3247, 949, 3298), [], "column4")]
+    parts = _heading_pieces(Item("column4", "<i>Jacob.</i> <i>Esau.</i>", ["L1", "L2"], "heading"), lines, 25)
+    assert [(p.text, p.lines) for p, _ in parts] == [("<i>Jacob.</i>", ["L1"]), ("<i>Esau.</i>", ["L2"])]
+
+
+def test_a_note_given_again_without_lines_is_dropped_but_not_one_with_other_numbers():
+    from pdf_ocr_bench.llm_structure import _drop_doubled_notes
+
+    items = [Item("n", "Ibid. v. 3.", ["L1"], "note"), Item("n", "Ibid. v. 5.", [], "note"),
+             Item("n", "Gen. xiv. 3.", ["L2"], "note"), Item("n", "Gen. xv. 3.", [], "note"),
+             Item("n", "<i>Joseph.</i> Antiq. l. 7. c. 6.", ["L3"], "note"), Item("n", "Joseph. Antiq. l. 7. c. 6.", [], "note")]
+    _drop_doubled_notes(items)
+    assert [(i.text, i.lines) for i in items] == [("Ibid. v. 3.", ["L1"]), ("Ibid. v. 5.", []), ("Gen. xiv. 3.", ["L2"]),
+                                                  ("Gen. xv. 3.", []), ("<i>Joseph.</i> Antiq. l. 7. c. 6.", ["L3"])]
+
+
+def test_margin_rows_are_the_printed_rows_and_notes_set_row_against_row_are_cut_at_their_pitch():
+    from pdf_ocr_bench.reconstruct import margin_rows
+
+    ink = np.zeros((600, 200), np.uint8)
+    ink[100:125, 20:150] = 1  # a row
+    ink[300:380, 20:150] = 1  # two rows touching, 40 px apart
+    ink[500:503, 20:30] = 1  # a speck
+    assert margin_rows(ink, 0, 200, 0, 600, 25) == [(100, 125), (300, 380)]
+    assert margin_rows(ink, 0, 200, 0, 600, 25, pitch=40) == [(100, 125), (300, 340), (340, 380)]
