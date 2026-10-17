@@ -518,14 +518,21 @@ def column_parts(item: Item, group: list[Line], lh: float) -> list[tuple[Item, l
         # (nor a lone short piece, after which its lines go on in the column they were in: a margin
         # note's "De-" a row above, listed among the paragraph's lines, set its rest from there, 3 em
         # over its own first part, p. 865): no part, the rest goes on in the run before
+        # (short by the column's measure, its widest line not Vision ran over the gutter: where the
+        # layout cut every row in two at a strip it took for notes, the median piece is short too,
+        # and "Theo-", the end of a row boxed 11 pt high, listed after the row below, made a part,
+        # p. 704; and the next line in the column of the run before, not under its last piece, the
+        # left half of a row whose right half "Theo-" stands in)
         widths = sorted(l.box.w for l in group)
-        wide = widths[len(widths) // 2]
+        wide = max(w for w in widths if w <= 1.5 * widths[len(widths) // 2] or w == widths[0])
         k = 1
         while k < len(runs):
             stray, rest = runs[k][0], runs[k][1:]
             last = max(runs[k - 1], key=lambda l: l.box.y0)
+            col = [l for l in runs[k - 1] if l.box.w <= 1.5 * widths[len(widths) // 2]] or runs[k - 1]
+            c0, c1 = min(l.box.x0 for l in col), max(l.box.x1 for l in col)
             if stray.box.w < 0.25 * wide and rest and 0 <= rest[0].box.y0 - last.box.y0 < 3 * lh \
-                    and min(rest[0].box.x1, last.box.x1) - max(rest[0].box.x0, last.box.x0) > 0.5 * min(rest[0].box.w, last.box.w):
+                    and min(rest[0].box.x1, c1) - max(rest[0].box.x0, c0) > 0.5 * rest[0].box.w:
                 runs[k - 1] = runs[k - 1] + rest
                 del runs[k]
                 continue
@@ -724,6 +731,19 @@ def _opening_line(text: str, group: list[Line]) -> Line | None:
     # often, "The coman bavino an alue of Blood", and a later "Then the Woman came" is no start, p. 355)
     hits = [l for l in group if opens(l) and l.box.y0 < group[0].box.y0 - 0.5 * max(l.box.h, 1)]
     return min(hits, key=lambda l: l.box.y0) if hits else None
+
+
+def _read_from(text: str, line: Line) -> int:
+    """Where in `text` (its word index) the first three words of `line` that follow one another in it
+    stand, from any word of the line on (a line Vision ran across the gutter begins with the other
+    column's words); 0 if none do."""
+    words = [_norm_word(plain(w)) for w in text.split()]
+    read = [k for k in (_norm_word(w) for w in line.text.split()) if k]
+    at = {}
+    for j in range(len(words) - 2):
+        at.setdefault(tuple(words[j:j + 3]), j)
+    hits = [at[tuple(read[s:s + 3])] for s in range(len(read) - 2) if tuple(read[s:s + 3]) in at]
+    return min(hits) if hits else 0
 
 
 def _lead_words(text: str, top: Line) -> int:
@@ -1563,6 +1583,19 @@ def zones_role(layout: PageLayout, zone_id: str) -> str:
     return next((z.role for z in layout.zones if z.id == zone_id), "")
 
 
+@dataclass
+class _Renamed(Zone):
+    """A zone given another role that keeps its name: a Zone's id is its role and index, and a note
+    strip taken for a column ("notes0" as "column0") took the id of the page's column0, whose
+    paragraphs were all set in the strip's box (94 pages of vol. 1, p. 1051)."""
+
+    name: str = ""
+
+    @property
+    def id(self) -> str:
+        return self.name
+
+
 def page_zones(layout: PageLayout) -> list[Zone]:
     """The layout's zones, a note strip as wide as a column of its own band taken for a column (the
     layout calls a column a note strip when another band of the page is set full width: it
@@ -1577,7 +1610,7 @@ def page_zones(layout: PageLayout) -> list[Zone]:
                     and min(o.box.y1, z.box.y1) - max(o.box.y0, z.box.y0) > 0.5 * min(o.box.h, z.box.h)]
             widest = max([o.box.w for o in band] + [z.box.w])
             if z.box.w >= 0.45 * widest and z.box.w >= 12 * lh:
-                z = replace(z, role="column")
+                z = _Renamed(role="column", box=z.box, index=z.index, side=z.side, glyph=z.glyph, name=z.id)
         out.append(z)
     return out
 
@@ -1725,7 +1758,9 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
         below = [(it, g) for it in items if it.kind in ("paragraph", "note") and "foot" not in it.label.lower()
                  and not (it.kind == "note" and it.label in zones and zones[it.label].role == "notes")
                  and (g := [by_id[i] for i in it.lines if i in by_id]) and min(l.box.y0 for l in g) >= foot_top
-                 and not outer_note(it, g)]
+                 and not outer_note(it, g)
+                 # (nor the catchword, flush right under them: "perfume" joined to the footnotes' end, p. 940)
+                 and not (it.align == "right" and len(plain(it.text).split()) <= 2)]
 
         def text_type(it: Item, g: list[Line]) -> bool:
             # text in the text's type the columns' zones end above, with no footnote mark ("The
@@ -1749,6 +1784,14 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
               and (FOOT_MARK.match(it.text) or (it.kind == "paragraph" and LETTER_MARK.match(it.text)))
               and (g := [by_id[i] for i in it.lines if i in by_id]) and min(l.box.y0 for l in g) > 0.6 * layout.height
               and not outer_note(it, g)]
+    if len(marked) == 1 and main and "foot" not in marked[0].label.lower():
+        # one marked footnote alone, under the page's tall columns, not in the text's type: a footnote
+        # too ("* The several regulations", in a band the layout cut into short columns of its own,
+        # set at the text's size, a row more than printed, over the catchword, p. 940)
+        it = marked[0]
+        g = [by_id[i] for i in it.lines if i in by_id]
+        if min(l.box.y0 for l in g) >= max(z.box.y1 for z in main) - 0.3 * layout.line_height and not text_type(it, g):
+            it.label = "footnotes (marked)"
     if len(marked) >= 2:
         for it in marked:
             if "foot" not in it.label.lower():
@@ -2064,14 +2107,21 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
             text_lines = [l for l in group if l.zone in zones and zones[l.zone].role != "footnotes"]
             item = replace(item, zone=_majority_zone(text_lines, whole.zone) if text_lines else whole.zone)
             zone = zones.get(item.zone)
+        if zone is None and _majority_zone(group, "") in zones:
+            # a zone the page's zones do not have (a strip dropped as a rule between columns): its
+            # lines' (the running head "JER (764) JER", four plate titles, p. 167, were not set)
+            item = replace(item, zone=_majority_zone(group, ""))
+            zone = zones[item.zone]
         if zone is None:
             continue
         first = min(group, key=lambda l: (l.box.y0, l.box.x0)) if part_no else (_opening_line(item.text, group) or group[0])
-        if part_no == 0 and item.kind == "paragraph" and first is group[0] and _lead_words(item.text, first) >= 6:
+        if part_no == 0 and item.kind == "paragraph" and first is group[0] and (
+                _lead_words(item.text, first) >= 6 or _read_from(item.text, first) >= 6):
             # the line listed first reads words far into the text, and none reads its first words
             # (Vision read the column's top four rows as "FLE"): the topmost line of its column above
             # it is where it starts (set from the line listed first, it ran 7.6 em into the next
-            # entry, p. 980)
+            # entry, p. 980; or a line Vision ran across the gutter, the other column's words first: its
+            # own read from the twelfth word on, 2 em into the next entry, p. 184)
             above = [l for l in group if l.box.y0 < first.box.y0 - 0.5 * layout.line_height
                      and min(l.box.x1, first.box.x1) - max(l.box.x0, first.box.x0) > 0.5 * min(l.box.w, first.box.w)]
             if above:
@@ -2151,7 +2201,10 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
             # the measure of its own lines: where most start, where the long ones end
             # (the pieces of each printed line joined: the layout may cut a band into narrow zones,
             # and assign() splits a line by them)
-            ex0, ex1, n_rows = row_extent(group, layout.line_height, ragged=item.kind == "note")
+            # (ragged, its longest line, for a verse or a list set flush left or centred: by where most of
+            # its three lines end, "Compellendus erit quo nunquam terra vocato" was set in a box 235 pt
+            # short of it, a line more than printed, p. 870)
+            ex0, ex1, n_rows = row_extent(group, layout.line_height, ragged=item.kind == "note" or item.align in ("left", "center"))
             if item.kind == "paragraph":  # (the notes Vision ran into its lines are no part of it)
                 ex0, ex1 = text_edges(ink, ex0, ex1, min(l.box.y0 for l in group), max(l.box.y1 for l in group),
                                       layout.line_height, n_rows, [w for l in group for w in l.words], item.text)
@@ -3008,7 +3061,8 @@ def fit_round(target: Path, page_blocks: dict[int, list[Block]], pages_meta: lis
                     size = min(0.98 * b.size, own)
                     # (10% for a paragraph of ten printed lines and more: its room is what they
                     # took, and the estimate breaks no word where azul hyphenates, p. 1046)
-                    least = 0.9 if b.fit and b.fit[0] >= 10 else 0.94
+                    # (8% for one of four printed rows or fewer: its three rows took a fourth at 6.5% smaller, p. 675)
+                    least = 0.9 if b.fit and b.fit[0] >= 10 else (0.92 if b.fit and b.fit[0] <= 4 else 0.94)
                     if room_lines >= 1 and size >= least * level:
                         b.size = size
                         _follow_size(b)
