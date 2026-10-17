@@ -729,14 +729,56 @@ def locate(text: str, lines: list[Line], lh: float) -> tuple[Box, list] | None:
     enough = 1 if n_words == 1 or (n_words == 2 and any(len(k) >= 4 and k.isalpha() for k, _, _ in best_m)) \
         or (n_words <= 4 and any(glued and len(k) >= 3 and k.isalpha() for k, _, glued in best_m)) \
         else max(2, 0.4 * n_words)
-    if best is None or best_n < enough:
-        return None
     # (a note with a name, found by its name: "6." and "2" of the text's "li. 6. 3. 2" are not
     # "2 Cor. ix. 6.", set over the paragraph, p. 316)
     def name(k: str) -> bool:
         return len(k) >= 3 and k.isalpha() and not re.fullmatch(r"[ivxlc]+", k)
+
+    def stacked() -> tuple[Box, list] | None:
+        # a note in a narrow margin: a word or two of it on each of the text's lines beside it, at
+        # their ends or starts ("Nyffen." / "vita Thau." / "s45, $47" of "Nyssen. vita Thaumat. p. 545,
+        # 547.", p. 965): the line whose edge words, with those of the lines below it at the same
+        # place, read half of it and its name
+        ordered = sorted(lines, key=lambda l: l.box.y0)
+
+        def edge_hits(line: Line, left: dict, near: tuple[float, float] | None) -> list:
+            ps = pieces(line)
+            out = []
+            for n, (t, b) in enumerate(ps):
+                if 2 <= n < len(ps) - 2:
+                    continue  # amid the line: the text's own words
+                if near is not None and not (b.x1 >= near[0] and b.x0 <= near[1]):
+                    continue
+                h = word_hit(t, b, left)
+                if h is not None:
+                    left[h[0]] -= 1
+                    out.append((h[0], h[1]))
+            return out
+
+        best_hits: list = []
+        for k, line in enumerate(ordered):
+            left = dict(want)
+            hits = edge_hits(line, left, None)
+            if not hits:
+                continue
+            near = (min(b.x0 for _, b in hits) - 1.5 * lh, max(b.x1 for _, b in hits) + 1.5 * lh)
+            for other in ordered[k + 1:]:
+                if other.box.y0 > line.box.y0 + (n_words / 2 + 1) * 1.5 * lh:
+                    break
+                hits += edge_hits(other, left, near)
+            if len(hits) > len(best_hits):
+                best_hits = hits
+        if len(best_hits) < max(2, 0.5 * n_words) or (any(name(k) for k in want) and not any(name(k) for k, _ in best_hits)):
+            return None
+        box = best_hits[0][1]
+        for _, b in best_hits[1:]:
+            box = box.union(b)
+        return box, best_hits
+
+    if best is None or best_n < enough:
+        return stacked() if best is not None else None
     if any(name(k) for k in want) and not any(name(k) for k, _, _ in best_m):
-        return None
+        return stacked()
     # on that line, the longest run of its words (a gap of one word allowed): "Ch. iv. 14, 15" at
     # the line's start, not every "14" in the text beside it
     keys = dict(want)
@@ -761,7 +803,7 @@ def locate(text: str, lines: list[Line], lh: float) -> tuple[Box, list] | None:
         runs.append(cur)
     first = max(runs, key=len, default=[])
     if len(first) < (1 if enough == 1 else max(2, -(-n_words // 2))):
-        return None  # a stray "iv" or "14" in the text beside it is no find
+        return stacked()  # a stray "iv" or "14" in the text beside it is no find
     x0, x1 = min(b.x0 for b in first) - lh, max(b.x1 for b in first) + lh
     found, left = [], dict(want)
     for line in sorted(lines, key=lambda l: l.box.y0):
@@ -851,18 +893,32 @@ def place_lineless(items: list[Item], lines: list[Line], layout: PageLayout) -> 
             else:
                 free.append((t, b))
         loose.append(replace(l, words=free))
-    prev_kind = ""
+    prev_kind = prev_label = ""
+    zone_ids = {z.id for z in layout.zones}
     for k, item in enumerate(items):
         own = [l for l in lines + made if l.id in item.lines]
         if own:
-            prev, prev_kind = own, item.kind
+            prev, prev_kind, prev_label = own, item.kind, item.label
             continue
         hit = locate(item.text, loose, lh)
+        if item.kind == "note" and not hit and prev and item.label not in zone_ids:
+            # one the model put in a strip the page has not (its other margin, named "notes1" where
+            # the layout found one strip), listed before a paragraph of another column than the item
+            # before it: beside that paragraph (p. 965: the right margin's notes went under the left
+            # column's last paragraph, all at the foot of the page)
+            after = next(([l for l in lines if l.id in it.lines] for it in items[k + 1:]
+                          if it.kind == "paragraph" and any(l.id in it.lines for l in lines)), [])
+            if after and _majority_zone(after, "") != _majority_zone(prev, ""):
+                prev = after
         # the note strips beside the item before it (one elsewhere on the page is no margin here:
         # its x at this height is in the text, 174 pt of a paragraph kept free for it, p. 705; nor
         # one whose lines are the ends of a paragraph's, cut off by the layout, p. 106)
+        # (and next to it, not on the far side of the other column: a right column's note went to
+        # the left margin, p. 965)
         strips = [z for z in layout.zones if z.role == "notes" and prev and z.id not in text_strips
-                  and z.box.y0 - 2 * lh <= min(l.box.y0 for l in prev) <= z.box.y1]
+                  and z.box.y0 - 2 * lh <= min(l.box.y0 for l in prev) <= z.box.y1
+                  and (abs(z.box.x1 - min(l.box.x0 for l in prev)) < 4 * lh or abs(z.box.x0 - max(l.box.x1 for l in prev)) < 4 * lh
+                       or min(l.box.x0 for l in prev) - 4 * lh <= (z.box.x0 + z.box.x1) / 2 <= max(l.box.x1 for l in prev) + 4 * lh)]
         if not hit and _ratio_of(item.text) == HEBREW_LETTER:
             hit = unread_ink(layout, lines + made, prev, lh)
         if hit:
@@ -907,7 +963,7 @@ def place_lineless(items: list[Item], lines: list[Line], layout: PageLayout) -> 
         if zone is not None and item.zone not in {z.id for z in layout.zones}:
             item.zone = zone.id
         if item.kind != "note" or line_id not in floating:
-            prev, prev_kind = [line], item.kind  # notes beside one entry stay beside its start
+            prev, prev_kind, prev_label = [line], item.kind, item.label  # notes beside one entry stay beside its start
     return made, floating
 
 
