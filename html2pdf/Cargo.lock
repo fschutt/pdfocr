@@ -3,6 +3,15 @@
 version = 4
 
 [[package]]
+name = "accesskit"
+version = "0.24.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3b7f7f85a7e5f68090000ed7622545829afd484d210358702ae4cb97dd0c320"
+dependencies = [
+ "uuid",
+]
+
+[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -143,7 +152,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 [[package]]
 name = "azul-core"
 version = "0.0.16"
-source = "git+https://github.com/fschutt/azul?branch=fix%2Finput-bugs-2026-09-19#02cc380e47dec4982c10593b2985ced9c34849e0"
+source = "git+https://github.com/fschutt/azul?branch=fix%2Finput-bugs-2026-09-19#8b9620a2204ce77767af5cb398b4a124a34fa56a"
 dependencies = [
  "azul-css",
  "gl-context-loader",
@@ -154,7 +163,7 @@ dependencies = [
 [[package]]
 name = "azul-css"
 version = "0.0.16"
-source = "git+https://github.com/fschutt/azul?branch=fix%2Finput-bugs-2026-09-19#02cc380e47dec4982c10593b2985ced9c34849e0"
+source = "git+https://github.com/fschutt/azul?branch=fix%2Finput-bugs-2026-09-19#8b9620a2204ce77767af5cb398b4a124a34fa56a"
 dependencies = [
  "azul-simplecss",
  "libm",
@@ -163,8 +172,9 @@ dependencies = [
 [[package]]
 name = "azul-layout"
 version = "0.0.16"
-source = "git+https://github.com/fschutt/azul?branch=fix%2Finput-bugs-2026-09-19#02cc380e47dec4982c10593b2985ced9c34849e0"
+source = "git+https://github.com/fschutt/azul?branch=fix%2Finput-bugs-2026-09-19#8b9620a2204ce77767af5cb398b4a124a34fa56a"
 dependencies = [
+ "accesskit",
  "allsorts-azul",
  "azul-core",
  "azul-css",
@@ -562,6 +572,7 @@ name = "html2pdf"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "azul-layout",
  "clap",
  "printpdf",
  "serde",
@@ -883,7 +894,7 @@ checksum = "439ee305def115ba05938db6eb1644ff94165c5ab5e9420d1c1bcedbba909391"
 [[package]]
 name = "printpdf"
 version = "0.12.8"
-source = "git+https://github.com/fschutt/printpdf?branch=perf%2Foptimize-images#cd845ff93541de4f6189ac37c04f9fe96ce77686"
+source = "git+https://github.com/fschutt/printpdf?branch=azul-codegen-api-optimize-images#153335dbfdab91357019fcc73a10828165fe5aa0"
 dependencies = [
  "allsorts-azul",
  "azul-core",
@@ -1294,6 +1305,12 @@ name = "utf8parse"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
+
+[[package]]
+name = "uuid"
+version = "1.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7cc1186384beb7dd8eedea376413fd654937285ea6c9cfbb928dc3043ea4b606"
 
 [[package]]
 name = "version_check"

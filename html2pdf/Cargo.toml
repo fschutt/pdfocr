@@ -9,13 +9,17 @@ publish = false
 [dependencies]
 # printpdf and azul from their fix branches: column-count across paragraphs (azul#481), the
 # space glyph and one text object per line (printpdf#288/#289), and many layout fixes;
-# printpdf's perf/optimize-images (on fix/html-images-decoded-per-page) for optimize_images
-printpdf = { git = "https://github.com/fschutt/printpdf", branch = "perf/optimize-images", features = ["png"] }
+# printpdf's azul-codegen-api-optimize-images: azul-codegen-api (azul 8b9620a2's API) with
+# perf/optimize-images (optimize_images, html images decoded on demand) merged in
+printpdf = { git = "https://github.com/fschutt/printpdf", branch = "azul-codegen-api-optimize-images", features = ["png"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
+# only to turn on azul-layout's `a11y`: at 8b9620a2 managers/a11y.rs uses NodeHierarchyItem, whose
+# import is behind that feature, outside it - azul-layout does not build without it
+azul-layout = { version = "0.0.16", default-features = false, features = ["a11y"] }
 
 [profile.release]
 opt-level = 3
