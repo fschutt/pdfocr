@@ -634,10 +634,21 @@ def _opening_line(text: str, group: list[Line]) -> Line | None:
     line's first six), the topmost if several; None if none does. The model may list a later line
     first: "Towards the evening" set at L155, 1700 pt below where it is printed, p. 913."""
     head = [k for k in (_norm_word(plain(w)) for w in text.split()[:3]) if k]
-    if not head:
+    if not head or not group:
         return None
     need = min(2, len(head))
-    hits = [l for l in group if sum(1 for k in head if k in [_norm_word(w) for w in l.text.split()[:6]]) >= need]
+
+    def opens(l: Line) -> bool:
+        # (its first word among the line's first three, and two of the three: "the", "of" and "I" are
+        # in many lines; a later line that has them set five paragraphs 9-15 em off, p. 36, 799, 863)
+        read = [_norm_word(w) for w in l.text.split()[:6]]
+        return head[0] in read[:3] and sum(1 for k in head if k in read) >= need
+
+    if opens(group[0]):
+        return group[0]
+    # (only a line above the one listed first: that one is right but for its misreadings far more
+    # often, "The coman bavino an alue of Blood", and a later "Then the Woman came" is no start, p. 355)
+    hits = [l for l in group if opens(l) and l.box.y0 < group[0].box.y0 - 0.5 * max(l.box.h, 1)]
     return min(hits, key=lambda l: l.box.y0) if hits else None
 
 
@@ -1787,14 +1798,17 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
                 ex0, ex1 = text_edges(ink, ex0, ex1, min(l.box.y0 for l in group), max(l.box.y1 for l in group),
                                       layout.line_height, n_rows, [w for l in group for w in l.words], item.text)
             measure = measure_for(ex0, ex1) if len(rows) >= 2 or zone.role in ("column", "text") else None
-            if measure is None and columns_measured and zone.box.w > 1.4 * min(m1 - m0 for m0, m1 in columns_measured):
+            widest = max((m1 - m0 for m0, m1 in columns_measured), default=0.0)
+            if measure is None and len(rows) == 1 and columns_measured and zone.box.w > 1.4 * widest:
                 # a line in a band the layout cut across the columns (one Vision ran over the gutter): the
                 # column its own words stand in, not the band (p. 178: "As large black Eyes" drawn
                 # across both columns, 1409 pt wide)
                 own = own_words(item.text, group)
                 if own:
                     cx = sorted((b.x0 + b.x1) / 2 for _, b in own)[len(own) // 2]
-                    col = next(((m0, m1) for m0, m1 in columns_measured if m0 - layout.line_height <= cx <= m1 + layout.line_height), None)
+                    # (a text column, not a table's narrow one: p. 799's genealogy)
+                    col = next(((m0, m1) for m0, m1 in columns_measured
+                                if m1 - m0 >= 0.5 * widest and m0 - layout.line_height <= cx <= m1 + layout.line_height), None)
                     if col is not None:
                         measure = (col[0], col[1] + 0.01 * (col[1] - col[0]))
                         ex0, ex1 = max(ex0, col[0]), min(ex1, col[1])
