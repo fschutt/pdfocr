@@ -15,6 +15,7 @@ from __future__ import annotations
 import difflib
 import json
 import re
+import shutil
 import threading
 from collections import Counter
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -204,6 +205,58 @@ def _join_split(items: list, known: dict) -> None:
         k += 1
 
 
+def margin_words(answer: dict | None, lines: list, layout: PageLayout) -> list[tuple[str, list[str], bool]]:
+    """The words the OCR read beyond the text's edge of a column (margin notes Vision ran into
+    the column's lines), per line: (line id, words, whether the answer's text has them). A word
+    the answer has anywhere counts (a table's cells stand beyond a column's edge too)."""
+    from .reconstruct import _norm_word, plain
+
+    have: dict[str, int] = {}
+    for it in (answer or {}).get("items", []):
+        if it.get("kind") != "noise":
+            for w in plain(it.get("text", "")).split():
+                k = _norm_word(w)
+                if k:
+                    have[k] = have.get(k, 0) + 1
+    lh = layout.line_height
+    out = []
+    for z in layout.zones:
+        if z.role != "column":
+            continue
+        full = [l for l in lines if l.zone == z.id and l.box.w > 0.6 * z.box.w]
+        if len(full) < 8:
+            continue
+        # the text's edges: where most of its full lines end and start (those a note ran into end later)
+        x1s, x0s = sorted(l.box.x1 for l in full), sorted(l.box.x0 for l in full)
+        edge1, edge0 = x1s[len(x1s) // 4], x0s[3 * len(x0s) // 4]
+        for line in lines:
+            if line.zone != z.id:
+                continue
+            words = [t for t, b in line.words if len(_norm_word(t)) >= 2
+                     and not edge0 - 0.8 * lh <= (b.x0 + b.x1) / 2 <= edge1 + 0.8 * lh]
+            if not words:
+                continue
+            found = 0
+            for t in words:
+                k = _norm_word(t)
+                if have.get(k, 0) > 0:
+                    have[k] -= 1
+                    found += 1
+            out.append((line.id, words, found >= 0.5 * len(words)))
+    return out
+
+
+def _margin_feedback(frags: list[tuple[str, list[str], bool]]) -> str:
+    shown = "; ".join(f'{i}: "{" ".join(ws)}"' for i, ws, found in frags if not found)
+    return ("\n\nAn earlier answer to this page left out its marginal notes. The OCR ran them into the "
+            "ends (or starts) of these lines of the text, beyond the text's edge: " + shown + ". Read every "
+            "marginal note from the images, in both margins (they are printed beside the text, often over "
+            "several lines; the OCR may have read them only in part or not at all), and give each as its own "
+            "item of kind \"note\", in reading order beside the paragraph it stands next to; leave its words "
+            "out of the paragraph's text. A note none of whose words the OCR read on a line of its own has "
+            "lines: [].")
+
+
 def _pairs(text: str) -> set[tuple[str, str]]:
     words = re.findall(r"\w+", text.lower().replace("ſ", "s").replace("f", "s"))
     return set(zip(words, words[1:]))
@@ -388,6 +441,26 @@ class Structurer:
             items = to_items(answer, r["lines"], r["layout"]) if answer else None
             if items is not None:
                 break
+        if items is not None and not (pw / "margin_asked").exists() and not self.limited.is_set():
+            # its margin notes left out (Vision ran them into the text's lines, and the answer left
+            # their words out of the paragraphs and gave no note for them): asked once more, told
+            # which; the answer that reads more of them is kept
+            frags = margin_words(answer, r["lines"], r["layout"])
+            total = sum(len(ws) for _, ws, _ in frags)
+            missed = sum(len(ws) for _, ws, found in frags if not found)
+            if total >= 6 and missed >= 0.5 * total:
+                (pw / "margin_asked").write_text(f"{missed} of {total} margin words\n", encoding="utf-8")
+                content, _ = claude_cli.page_content(self.work / r["name"] / "native.png", pw)
+                content.append({"type": "text", "text": prompt + _margin_feedback(frags)})
+                again, result2 = claude_cli.ask(content, self.system, SCHEMA, pw, self.model, zoom=self.zoom,
+                                                thinking=self.thinking, name="margin")
+                items2 = to_items(again, r["lines"], r["layout"]) if again else None
+                if items2 is not None:
+                    missed2 = sum(len(ws) for _, ws, found in margin_words(again, r["lines"], r["layout"]) if not found)
+                    if missed2 < missed:
+                        shutil.copyfile(pw / "margin.jsonl", pw / "response.jsonl")
+                        answer, items, result = again, items2, result2
+                        log.info(f"{r['name']}: margin notes asked again: {missed} -> {missed2} of {total} words unread")
         if items is None:
             log.warning(f"{r['name']}: no usable answer ({result.get('subtype') or result.get('error') or result.get('result') or 'lost text'}); heuristic structure")
         else:

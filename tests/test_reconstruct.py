@@ -425,3 +425,21 @@ def test_type_sizes_of_a_page_are_grouped():
     est = [(40.0, 20), (39.2, 15), (41.0, 18), (28.5, 2), (29.6, 1), (30.1, 2), (47.0, 2)]
     assert size_levels(est) == [29.6, 40.0, 47.0]
 
+
+
+def test_margin_words_are_the_words_vision_ran_into_a_column_from_its_margin():
+    from pdf_ocr_bench.llm_structure import margin_words
+
+    layout = PageLayout(width=1000, height=1000, line_height=30)
+    layout.zones = [Zone("column", Box(100, 100, 900, 900), 0)]
+    def line(i, y, text, note=None):
+        words = [(w, Box(100 + 60 * k, y, 150 + 60 * k, y + 30)) for k, w in enumerate(text.split())]
+        if note:
+            words.append((note, Box(820, y, 890, y + 30)))
+        return Line(i, text + (" " + note if note else ""), Box(100, y, 890 if note else 760, y + 30), words, "column0")
+    lines = [line(f"L{k}", 100 + 40 * k, "word " * 10, "Gen." if k == 2 else ("xxii." if k == 3 else None)) for k in range(10)]
+    answer = {"items": [{"kind": "paragraph", "lines": [l.id for l in lines], "text": "word " * 100}]}
+    found = margin_words(answer, lines, layout)
+    assert [(i, ws, f) for i, ws, f in found] == [("L2", ["Gen."], False), ("L3", ["xxii."], False)]
+    answer["items"].append({"kind": "note", "lines": [], "text": "Gen. xxii."})
+    assert all(f for _, _, f in margin_words(answer, lines, layout))
