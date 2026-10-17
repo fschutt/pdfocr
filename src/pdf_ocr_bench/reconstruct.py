@@ -2045,6 +2045,27 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
             # p. 730): as many lines higher as its words before that line take
             before = " ".join(plain(b.item.text).split()[:b.lead])
             b.y = max(0.0, b.y - wrap_lines(before, b.w, b.size, _times(b.item.italic)) * b.line_h)
+    # a margin note with a word wider than its margin (a Greek or Hebrew word, "Dameschack."): out
+    # to the page's edge first (half an em off it), in an outer margin, and only as much smaller as
+    # that still leaves (eight ran 5-30 pt off the page, vol. 1)
+    for b in blocks:
+        if b.item is None or b.item.kind != "note" or "foot" in b.item.label.lower() or b.nowrap:
+            continue
+        face = _times(b.item.italic)
+        longest = max((face.text_length(w, b.size) for w in plain(b.item.text).split()), default=0.0) * 1.02
+        if longest <= b.w:
+            continue
+        edge = 0.5 * b.size
+        if b.x > 0.75 * width_pt:
+            b.w = max(b.w, min(longest, width_pt - edge - b.x))
+        elif b.x + b.w < 0.25 * width_pt:
+            right = b.x + b.w
+            b.x = max(edge, min(b.x, right - longest))
+            b.w = right - b.x
+        if longest > b.w:
+            b.size *= max(MIN_FIT, b.w / longest)
+            _follow_size(b)
+            b.start_size = b.size
     return blocks
 
 
