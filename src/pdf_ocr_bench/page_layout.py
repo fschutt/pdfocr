@@ -28,6 +28,7 @@ import numpy as np
 
 ROLES = ("header", "column", "notes", "footnotes", "text", "picture", "dropcap")
 MIN_PICTURE_INK = 0.3  # share of a picture's box that is inked
+MIN_PLATE_INK = 0.08  # the same for a plate (an engraving or map many lines tall and wide)
 
 
 @dataclass(frozen=True)
@@ -135,6 +136,7 @@ def _line_height(stats: np.ndarray) -> float:
 
 def _large_shapes(stats: np.ndarray, large: np.ndarray, lh: float, width: int) -> tuple[list[Box], list[Box], np.ndarray]:
     """(pictures, drop-capital candidates, mask of components that are large type)."""
+    large_mask = large
     idx = np.flatnonzero(large)
     boxes = {i: Box(int(stats[i, 0]), int(stats[i, 1]), int(stats[i, 0] + stats[i, 2]), int(stats[i, 1] + stats[i, 3]))
              for i in idx}
@@ -173,7 +175,10 @@ def _large_shapes(stats: np.ndarray, large: np.ndarray, lh: float, width: int) -
     for box in pictures:
         inside = ((stats[:, 0] >= box.x0) & (stats[:, 0] + stats[:, 2] <= box.x1)
                   & (stats[:, 1] >= box.y0) & (stats[:, 1] + stats[:, 3] <= box.y1))
-        if stats[inside, 4].sum() >= MIN_PICTURE_INK * box.w * box.h:
+        # (a line engraving or a map is sparser: 11-30% inked, a plate of 80-390 lines' height made
+        # of hundreds of large shapes; vol. 1 lost 30 plates and maps as text zones)
+        plate = box.w >= 30 * lh and box.h >= 30 * lh and (inside & large_mask).sum() >= 50
+        if stats[inside, 4].sum() >= (MIN_PLATE_INK if plate else MIN_PICTURE_INK) * box.w * box.h:
             kept.append(box)
         elif box.w <= 16 * lh and box.h <= 16 * lh:
             initials.append(box)  # a plain capital as tall as eight lines: a drop capital, if a column's

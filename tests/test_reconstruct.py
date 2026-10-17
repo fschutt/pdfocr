@@ -388,7 +388,7 @@ def test_a_paragraph_running_on_into_the_next_column_is_a_block_per_column():
 def test_other_markup_in_an_answer_is_normalised():
     from pdf_ocr_bench.reconstruct import normalize_markup
 
-    assert normalize_markup("Chester<sup>a</sup>, <em>Job</em> <small>xi.</small> <SUP class=x>q</SUP>") == "Chester<sup>a</sup>, <i>Job</i> xi. <sup>q</sup>"
+    assert normalize_markup("Chester<sup>a</sup>, <em>Job</em> <small>xi.</small> <SUP class=x>q</SUP>") == "Chester<sup>a</sup>, <i>Job</i> xi.<sup>q</sup>"  # a mark against its word
     assert normalize_markup('<span class="x">Basil</span><br>Rome') == "Basil Rome"
 
 

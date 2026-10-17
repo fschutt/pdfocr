@@ -486,6 +486,7 @@ class Block:
     measure: str = ""  # what measured its size: "line width" (its area's printed lines), else its glyphs
     lead: int = 0  # a note: the words of its text before the first line the OCR read of it
     steps: tuple = ()  # the steps from one of its printed rows to the next, pt (what measured `pitch`)
+    hidden: bool = False  # text printed inside a picture (its legend, a plate's labels): invisible, still copyable
 
 
 def column_parts(item: Item, group: list[Line], lh: float) -> list[tuple[Item, list[Line]]]:
@@ -626,6 +627,18 @@ def _run_ends(runs: list[list[Line]], words: list[str]) -> list[int | None]:
         if ends[k] is not None and ends[k - 1] is not None and ends[k] < ends[k - 1]:
             ends[k] = None
     return ends
+
+
+def _opening_line(text: str, group: list[Line]) -> Line | None:
+    """The line of `group` that reads the first words of `text` (two of its first three among the
+    line's first six), the topmost if several; None if none does. The model may list a later line
+    first: "Towards the evening" set at L155, 1700 pt below where it is printed, p. 913."""
+    head = [k for k in (_norm_word(plain(w)) for w in text.split()[:3]) if k]
+    if not head:
+        return None
+    need = min(2, len(head))
+    hits = [l for l in group if sum(1 for k in head if k in [_norm_word(w) for w in l.text.split()[:6]]) >= need]
+    return min(hits, key=lambda l: l.box.y0) if hits else None
 
 
 def _lead_words(text: str, top: Line) -> int:
@@ -1279,6 +1292,18 @@ def set_footnotes(blocks: list[Block], by_id: dict, lh: float, px: float) -> Non
     lines = [by_id[i] for b in foot for i in b.item.lines if i in by_id]
     if not lines:
         return
+    # the band: from the OCR's own lines (not those placed for a footnote the OCR did not read, under
+    # the paragraph before it), the rows down from the last one with no gap of more than 2.5 lines (a
+    # margin piece or a footnote's stray line far above it lifted the whole block over the text, by
+    # up to 825 pt: p. 85, 108, 284, 452, 766)
+    read = [l for l in lines if not l.id.startswith("X")] or lines
+    band, last = [], None
+    for l in sorted(read, key=lambda l: -l.box.y0):
+        if last is not None and last - l.box.y1 > 2.5 * lh:
+            break
+        band.append(l)
+        last = l.box.y0 if last is None else min(last, l.box.y0)
+    lines = band
     x0, x1 = min(l.box.x0 for l in lines), max(l.box.x1 for l in lines)
     top = min(l.box.y0 for l in lines)
     tops = sorted({l.box.y0 for l in lines})
@@ -1295,6 +1320,7 @@ def set_footnotes(blocks: list[Block], by_id: dict, lh: float, px: float) -> Non
     first.pitch = steps[len(steps) // 2] * px if steps else 0.0
     first.steps = tuple(s * px for s in steps)
     first.fit = (len(rows), first.size, first.pitch)  # its printed rows: what sizes it (build_blocks)
+    first.lead = 0  # (a note's lift, from when the first was a note, is no footnote's: 24 blocks a line high)
     for b in foot[1:]:
         blocks.remove(b)
 
@@ -1355,6 +1381,19 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
     lines = lines + made
     by_id = {l.id: l for l in lines}
     zones = {z.id: z for z in layout.zones}
+    def outer_note(it: Item, g: list[Line]) -> bool:
+        # a narrow note in an outer margin, whatever the model named its zone: never a footnote (one
+        # joined to the footnotes pulled their block 10 em up over the text, p. 452, p. 501)
+        x0, x1 = min(l.box.x0 for l in g), max(l.box.x1 for l in g)
+        return it.kind == "note" and x1 - x0 < 0.2 * layout.width and (x1 < 0.22 * layout.width or x0 > 0.78 * layout.width)
+
+    for it in items:
+        g = [by_id[i] for i in it.lines if i in by_id and not i.startswith("X")]
+        if g and outer_note(it, g) and is_footnote(it, zones):
+            cx, cy = sum((l.box.x0 + l.box.x1) / 2 for l in g) / len(g), min(l.box.y0 for l in g)
+            near = [z for z in layout.zones if z.role in ("notes", "column")]
+            if near:
+                it.zone = it.label = min(near, key=lambda z: _distance(z.box, cx, cy)).id
     # footnotes the model put in a column (the layout may cut the footnote band into columns too):
     # text that starts below the bottom of the page's main columns
     # (below every column set in the text's type: a column may run on in a short band below the
@@ -1368,7 +1407,8 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
         # the one before it, was joined to the footnotes, p. 663)
         below = [(it, g) for it in items if it.kind in ("paragraph", "note") and "foot" not in it.label.lower()
                  and not (it.kind == "note" and it.label in zones and zones[it.label].role == "notes")
-                 and (g := [by_id[i] for i in it.lines if i in by_id]) and min(l.box.y0 for l in g) >= foot_top]
+                 and (g := [by_id[i] for i in it.lines if i in by_id]) and min(l.box.y0 for l in g) >= foot_top
+                 and not outer_note(it, g)]
 
         def text_type(it: Item, g: list[Line]) -> bool:
             # text in the text's type the columns' zones end above, with no footnote mark ("The
@@ -1390,7 +1430,8 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
     # block has no columns to be below: p. 445)
     marked = [it for it in items if it.kind in ("paragraph", "note")
               and (FOOT_MARK.match(it.text) or (it.kind == "paragraph" and LETTER_MARK.match(it.text)))
-              and (g := [by_id[i] for i in it.lines if i in by_id]) and min(l.box.y0 for l in g) > 0.6 * layout.height]
+              and (g := [by_id[i] for i in it.lines if i in by_id]) and min(l.box.y0 for l in g) > 0.6 * layout.height
+              and not outer_note(it, g)]
     if len(marked) >= 2:
         for it in marked:
             if "foot" not in it.label.lower():
@@ -1679,7 +1720,7 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
         zone = zones.get(item.zone)
         if zone is None:
             continue
-        first = min(group, key=lambda l: (l.box.y0, l.box.x0)) if part_no else group[0]
+        first = min(group, key=lambda l: (l.box.y0, l.box.x0)) if part_no else (_opening_line(item.text, group) or group[0])
         top = first.box.y0 * px
         size0 = em_of(group)
         lead_words = _lead_words(item.text, min(group, key=lambda l: l.box.y0)) if item.kind == "note" and part_no == 0 else 0
@@ -1746,6 +1787,17 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
                 ex0, ex1 = text_edges(ink, ex0, ex1, min(l.box.y0 for l in group), max(l.box.y1 for l in group),
                                       layout.line_height, n_rows, [w for l in group for w in l.words], item.text)
             measure = measure_for(ex0, ex1) if len(rows) >= 2 or zone.role in ("column", "text") else None
+            if measure is None and columns_measured and zone.box.w > 1.4 * min(m1 - m0 for m0, m1 in columns_measured):
+                # a line in a band the layout cut across the columns (one Vision ran over the gutter): the
+                # column its own words stand in, not the band (p. 178: "As large black Eyes" drawn
+                # across both columns, 1409 pt wide)
+                own = own_words(item.text, group)
+                if own:
+                    cx = sorted((b.x0 + b.x1) / 2 for _, b in own)[len(own) // 2]
+                    col = next(((m0, m1) for m0, m1 in columns_measured if m0 - layout.line_height <= cx <= m1 + layout.line_height), None)
+                    if col is not None:
+                        measure = (col[0], col[1] + 0.01 * (col[1] - col[0]))
+                        ex0, ex1 = max(ex0, col[0]), min(ex1, col[1])
             if measure is not None:
                 # the column's text measure, as its paragraphs are printed (its zone may take in a
                 # note margin, or the gutter); out to its own lines where they are printed a little
@@ -2051,6 +2103,34 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
             # p. 730): as many lines higher as its words before that line take
             before = " ".join(plain(b.item.text).split()[:b.lead])
             b.y = max(0.0, b.y - wrap_lines(before, b.w, b.size, _times(b.item.italic)) * b.line_h)
+    # two paragraphs side by side never overlap: at a gutter the print leaves next to nothing of, each
+    # column's measure ran into the other's (p. 829: 793-1523 beside 98-816); the middle of the
+    # overlap is their edge, a fifth of a line apart
+    paras = [b for b in blocks if b.item is not None and b.item.kind == "paragraph" and not b.nowrap and not b.picture]
+    gap = 0.2 * layout.line_height * px
+    for a in paras:
+        for b in paras:
+            if a is b or a.x + a.w / 2 >= b.x + b.w / 2:
+                continue  # a left of b only
+            over = a.x + a.w - b.x
+            rows_a = a.fit[0] if a.fit else 1
+            rows_b = b.fit[0] if b.fit else 1
+            a_end, b_end = a.y + rows_a * max(a.line_h, a.size), b.y + rows_b * max(b.line_h, b.size)
+            if over > 0 and min(a_end, b_end) - max(a.y, b.y) > a.line_h and over < 0.3 * min(a.w, b.w):
+                mid = (a.x + a.w + b.x) / 2
+                a.w = mid - gap / 2 - a.x
+                b.w, b.x = b.x + b.w - (mid + gap / 2), mid + gap / 2
+    # text the OCR read inside a picture (a plate's legend, its labels) is in the picture's image:
+    # drawn again on it, it stood over its own print (p. 622, p. 580); invisible, still found and copied
+    pics = [z.box for z in layout.zones if z.role == "picture"]
+    if pics:
+        for b in blocks:
+            if b.item is None or b.picture:
+                continue
+            g = [by_id[i] for i in b.item.lines if i in by_id and not i.startswith("X")]
+            inside = [l for l in g if any(p.contains_point((l.box.x0 + l.box.x1) / 2, (l.box.y0 + l.box.y1) / 2) for p in pics)]
+            if g and len(inside) >= 0.6 * len(g):
+                b.hidden = True
     # a margin note with a word wider than its margin (a Greek or Hebrew word, "Dameschack."): out
     # to the page's edge first (half an em off it), in an outer margin, and only as much smaller as
     # that still leaves (eight ran 5-30 pt off the page, vol. 1)
@@ -2084,7 +2164,7 @@ def blocks_html(blocks: list[Block], width_pt: float, height_pt: float, lang: st
                          f'height: {100 * b.h / height_pt:.4f}%;">')
         if b.item is not None:
             parts.append(_block(b.item, b.x, b.y, b.w, b.size, b.line_h, b.align, width_pt, height_pt, b.indent, b.nowrap,
-                                b.letter_spacing, invisible=bool(b.picture)))
+                                b.letter_spacing, invisible=bool(b.picture) or b.hidden))
     return f"""<!DOCTYPE html>
 <html lang="{htmlmod.escape(lang)}">
 <head>
@@ -2161,6 +2241,9 @@ def plain(text: str) -> str:
 TAG = re.compile(r"<(/?)([a-zA-Z]+)[^<>]*>")
 
 
+SPACED_MARK = re.compile(r"(?<=\S)\s+(?=<sup>(?:<i>)?[^<\s]{1,4}(?:</i>)?</sup>)")
+
+
 def normalize_markup(text: str) -> str:
     """A model's answer as text with <i>, <sup> and <sub> marks: <em> is <i>, other tags are
     dropped with their text kept."""
@@ -2169,7 +2252,9 @@ def normalize_markup(text: str) -> str:
         if name in MARKS:
             return f"<{m.group(1)}{name}>"
         return " " if name == "br" else ""
-    return TAG.sub(tag, text)
+    # (a reference mark stands against its word: the model writes "Drachma's</i> <sup>g</sup> upon",
+    # and the justified line set the mark apart as a word of its own, 369 times in vol. 1)
+    return SPACED_MARK.sub("", TAG.sub(tag, text))
 
 
 def _open_marks(text: str) -> list[str]:
