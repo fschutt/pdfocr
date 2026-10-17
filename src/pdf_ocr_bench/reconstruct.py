@@ -901,15 +901,21 @@ def place_lineless(items: list[Item], lines: list[Line], layout: PageLayout) -> 
             prev, prev_kind, prev_label = own, item.kind, item.label
             continue
         hit = locate(item.text, loose, lh)
-        if item.kind == "note" and not hit and prev and item.label not in zone_ids:
+        if item.kind == "note" and not hit and prev and item.label not in zone_ids \
+                and not (prev_kind == "note" and prev_label == item.label):
             # one the model put in a strip the page has not (its other margin, named "notes1" where
             # the layout found one strip), listed before a paragraph of another column than the item
             # before it: beside that paragraph (p. 965: the right margin's notes went under the left
-            # column's last paragraph, all at the foot of the page)
+            # column's last paragraph, all at the foot of the page). Another column by where the
+            # lines stand, not by zone: each band of a column is a zone of its own (p. 245); and not
+            # after a note of its own strip (p. 231)
             after = next(([l for l in lines if l.id in it.lines] for it in items[k + 1:]
                           if it.kind == "paragraph" and any(l.id in it.lines for l in lines)), [])
-            if after and _majority_zone(after, "") != _majority_zone(prev, ""):
-                prev = after
+            if after:
+                a0, a1 = min(l.box.x0 for l in after), max(l.box.x1 for l in after)
+                p0, p1 = min(l.box.x0 for l in prev), max(l.box.x1 for l in prev)
+                if min(a1, p1) - max(a0, p0) < 0.5 * min(a1 - a0, p1 - p0):
+                    prev = after
         # the note strips beside the item before it (one elsewhere on the page is no margin here:
         # its x at this height is in the text, 174 pt of a paragraph kept free for it, p. 705; nor
         # one whose lines are the ends of a paragraph's, cut off by the layout, p. 106)
