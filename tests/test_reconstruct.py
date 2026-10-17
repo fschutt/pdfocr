@@ -518,3 +518,37 @@ def test_a_line_vision_ran_over_the_gutter_is_split_at_the_white_between_the_col
     out = {l.id: l for l in split_across(items, lines, layout, ink)}
     assert items[0].lines == ["L1-L", "L2"] and items[1].lines == ["L3", "L1-R"]
     assert out["L1-L"].box.x1 <= 960 and out["L1-R"].box.x0 >= 1005
+
+
+def test_a_paragraph_read_on_into_the_next_columns_text_ends_at_the_word_the_print_divided():
+    from pdf_ocr_bench.llm_structure import _trim_repeated
+
+    rows = ["ADAMITES, a fort of Hereticks of", "the fecond Age: The Author of this Sect", "was one Prodicus, a Difciple of Carpo-",
+            "crates; and when any of them were guilty", "fuch an one they called Adam, and that", "he had eaten of the for-"]
+    lines = [Line(f"L{k}", t, Box(100, 100 + 40 * k, 800, 130 + 40 * k), [], "column0") for k, t in enumerate(rows)]
+    known = {l.id: l for l in lines}
+    rest = "bidden Fruit; and when they expelled him from their Assembly, they drove him out of Paradise."
+    a = Item("column0", "ADAMITES, a sort of Hereticks of the second Age: The Author of this Sect was one Prodicus, a Disciple of "
+             "Carpocrates; and when any of them were guilty such an one they called Adam, and that he had eaten of the forbidden "
+             "Fruit; and when they expelled him from their Assembly, they drove him out of Paradise.", [l.id for l in lines])
+    b = Item("column1", rest, [])
+    _trim_repeated([a, b], known)
+    assert a.text.endswith("he had eaten of the for-")
+
+
+def test_a_plate_in_a_ruled_frame_is_found_and_a_page_of_text_is_none():
+    from pdf_ocr_bench.reconstruct import plate_frame
+
+    ink = np.zeros((2000, 1600), np.uint8)
+    ink[100:104, 80:1520] = 1
+    ink[1900:1904, 80:1520] = 1
+    ink[100:1904, 80:84] = 1
+    ink[100:1904, 1516:1520] = 1
+    ink[500:520, 300:700] = 1  # a drawing in it
+    frame = plate_frame(ink, [Line("L1", "A. Chambers for Noah", Box(300, 600, 700, 630), [], "text0")])
+    assert frame is not None and frame.x0 <= 84 and frame.x1 >= 1516 and frame.y0 <= 104 and frame.y1 >= 1900
+    text = np.zeros((2000, 1600), np.uint8)
+    for y in range(100, 1900, 40):  # rows of words
+        for x in range(100, 1500, 60):
+            text[y:y + 20, x:x + 45] = 1
+    assert plate_frame(text, []) is None

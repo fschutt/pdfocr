@@ -968,8 +968,10 @@ def unread_ink(layout: PageLayout, lines: list[Line], prev: list[Line], lh: floa
         after = [r for r in after if r[-1].x1 < tx0 + lh or r[0].x0 > tx1 - lh]
     # (not ink inside a line of text, its line end Vision's box left out: "לא תערך לה כתם" was set
     # there, 40 pt wide, at the right edge of the column whose left margin its notes stand in, p. 945)
+    # (nor in a column's text at all: the unread end of a paragraph, "iv. 35.", took two Hebrew notes of
+    # the other column's margin, p. 246; the column by the long lines above and below it)
     long_ = [l.box for l in lines if len(l.text) >= 25]
-    after = [r for r in after if not any(b.x0 <= (r[0].x0 + r[-1].x1) / 2 <= b.x1 and abs(b.y0 - r[0].y0) < 1.5 * lh for b in long_)]
+    after = [r for r in after if sum(1 for b in long_ if b.x0 <= (r[0].x0 + r[-1].x1) / 2 <= b.x1 and abs(b.y0 - r[0].y0) < 10 * lh) < 2]
     if prev and max(l.box.x1 for l in prev) - min(l.box.x0 for l in prev) < 10 * lh:
         # (after a margin note: in its margin, if there is any there)
         mx0, mx1 = min(l.box.x0 for l in prev) - 2 * lh, max(l.box.x1 for l in prev) + 2 * lh
@@ -1133,6 +1135,37 @@ def catchword_ink(layout: PageLayout, lines: list[Line], prev: list[Line], lh: f
             break
         box = box.union(w)
     return box, []
+
+
+def plate_frame(ink, lines: list[Line]) -> Box | None:
+    """The ruled frame of an engraved plate drawn in lines too thin for the layout to take it for a
+    picture (the plan of Noah's ark, p. 222): rules near all four sides of the page, round most of it,
+    with little text inside (its labels and legend). None on a page of text."""
+    import numpy as np
+
+    if ink is None or sum(1 for l in lines if len(l.text) >= 25) > 20:
+        return None
+    h, w = ink.shape[0] // 4 * 4, ink.shape[1] // 4 * 4
+    small = ink[:h, :w].reshape(h // 4, 4, w // 4, 4).max(axis=(1, 3)).astype(bool)  # (thin rules kept)
+
+    def longest(a) -> np.ndarray:  # the longest inked run down each column of `a`
+        out = np.zeros(a.shape[1], int)
+        for j in range(a.shape[1]):
+            d = np.diff(np.concatenate(([0], a[:, j].astype(np.int8), [0])))
+            starts, ends = np.where(d == 1)[0], np.where(d == -1)[0]
+            if len(starts):
+                out[j] = (ends - starts).max()
+        return out
+
+    H, W = small.shape
+    cols = np.where(longest(small) >= 0.4 * H)[0]
+    rows = np.where(longest(small.T) >= 0.5 * W)[0]
+    if not len(cols) or not len(rows):
+        return None
+    left, right, top, bottom = cols.min(), cols.max(), rows.min(), rows.max()
+    if left > 0.25 * W or right < 0.75 * W or top > 0.35 * H or bottom < 0.65 * H:
+        return None
+    return Box(int(left * 4), int(top * 4), int(right * 4 + 4), int(bottom * 4 + 4))
 
 
 def margin_rows(ink, x0: int, x1: int, y0: int, y1: int, lh: float, pitch: float = 0.0) -> list[tuple[int, int]]:
@@ -2250,6 +2283,31 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
             x0, w = first.box.x0 * px, (max(l.box.x1 for l in group) - first.box.x0) * px
             face = _times(item.italic)
             label = plain(item.text)
+            read = re.sub(r"\s+", "", " ".join(l.text for l in sorted(group, key=lambda l: l.box.x0)))
+            mine = re.sub(r"\s+", "", label)
+            if len(read) > 1.3 * len(mine) and read.lower().startswith(mine.lower()[:max(1, len(mine) - 1)]):
+                # its OCR line reads on past it (a margin note's "4. Afix." after the catchword "E C-",
+                # p. 579; the page number's "(" after "HAZ", p. 773): to the white before the rest, or its
+                # share of the box, not all of it, letter-spaced across the rest
+                share = w * len(mine) / len(read)
+                w = share
+                if ink is not None and len(group) == 1:
+                    b_ = first.box
+                    cols = ink[max(0, b_.y0):b_.y1, max(0, b_.x0):b_.x1].sum(axis=0) > 0
+                    gaps, start = [], None
+                    for i, on in enumerate(list(cols) + [True]):
+                        if not on and start is None:
+                            start = i
+                        elif on and start is not None:
+                            if start > 0 and i < len(cols):
+                                gaps.append((i - start, start))
+                            start = None
+                    wide_gaps = [g for g in gaps if g[0] >= layout.line_height]
+                    if wide_gaps:
+                        # (the first such white after its share's half)
+                        after = [g for g in wide_gaps if g[1] * px >= 0.5 * share]
+                        if after:
+                            w = min(after, key=lambda g: g[1])[1] * px
             size = min(1.1 * size0, w / max(face.text_length(label, 1.0), 0.1))
             spacing = 0.0
             if first.spacing > SPACED and first.glyph and len(label) > 2:
@@ -2702,12 +2760,16 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
     # disagreed by 2-18 pt: notes over the line ends beside them, p. 525, 553, 795, 939)
     paras = [b for b in blocks if b.item is not None and b.item.kind == "paragraph" and not b.nowrap
              and "foot" not in b.item.label.lower() and not b.hidden]
+    # (and a heading line beside it, as wide as its text: "BLAS-", the column's last row, under a note, p. 352)
+    paras += [replace(b, w=min(b.w, _times(b.item.italic).text_length(plain(b.item.text), b.size)
+                               * (1 + b.letter_spacing * len(plain(b.item.text)) / max(len(plain(b.item.text)), 1))))
+              for b in blocks if b.item is not None and b.item.kind == "heading" and b.nowrap and not b.hidden]
     for b in blocks:
         if b.item is None or b.item.kind != "note" or "foot" in b.item.label.lower() or b.nowrap or b.hidden:
             continue
         rows = max(1, wrap_lines(plain(b.item.text), b.w, b.size, _times(b.item.italic)))
         y0, y1 = b.y, b.y + rows * max(b.line_h, b.size)
-        gap, least = 0.5 * b.size, 3 * b.size
+        gap, least = 0.5 * b.size, min(3 * b.size, 0.8 * b.w)  # (a note already narrow may stay so)
         def beside(p: Block) -> bool:
             p1 = p.y + max(p.fit[0] if p.fit else 1, 1) * max(p.line_h, p.size)
             return min(y1, p1) - max(y0, p.y) >= 0.3 * b.size
@@ -3326,6 +3388,22 @@ def reconstruct(pdf_path: Path, out: Path, pages: list[int], lang: tuple[str, ..
 
     pages_meta, page_blocks = [], {}
     for n, r in sorted(results.items()):
+        layout = r.get("layout")
+        if layout is not None and not any(z.role == "picture" and z.box.w * z.box.h > 0.3 * layout.width * layout.height
+                                          for z in layout.zones):
+            # a plate drawn in thin lines in a ruled frame: the scan's picture of it, its labels invisible
+            frame = plate_frame(_ink(work / r["name"] / "native.png"), r["lines"])
+            if frame is not None:
+                from PIL import Image
+
+                zone = Zone("picture", frame, 90)
+                rel = f"pictures/{r['name']}_plate.png"
+                (out / rel).parent.mkdir(parents=True, exist_ok=True)
+                with Image.open(work / r["name"] / "native.png") as im:
+                    im.crop((frame.x0, frame.y0, frame.x1, frame.y1)).save(out / rel, optimize=True)
+                r["layout"] = replace(layout, zones=layout.zones + [zone])
+                r["pictures"] = {**r["pictures"], zone.id: rel}
+                log.info(f"{r['name']}: a plate in a ruled frame, set as its picture")
         width_pt, height_pt = r["size"]
         page_blocks[n] = build_blocks(structures[n], r["lines"], r["layout"], r["pictures"], width_pt, height_pt,
                                       ink=_ink(work / r["name"] / "native.png"))

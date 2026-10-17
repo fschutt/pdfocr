@@ -207,6 +207,14 @@ def _trim_repeated(items: list, known: dict) -> None:
                 if keys[t:t + 8] == head:
                     item.text = _split_at(item.text, t)[0]
                     break
+                # (or begins with the rest of a word the print divided at the column's end, "for-|bidden
+                # Fruit": the whole of it was read into the paragraph before, which ran 2.3 em into the
+                # footnotes, p. 65): its text ends at the word's first part, as printed
+                w = plain(words[t])
+                if len(head[0]) >= 3 and keys[t] != head[0] and keys[t].endswith(head[0]) and keys[t + 1:t + 8] == head[1:] \
+                        and w.isalpha() and len(w) > len(head[0]):
+                    item.text = _split_at(item.text, t)[0] + " " + w[:len(w) - len(head[0])] + "-"
+                    break
             else:
                 continue
             break
