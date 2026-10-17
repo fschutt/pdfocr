@@ -629,6 +629,34 @@ def _run_ends(runs: list[list[Line]], words: list[str]) -> list[int | None]:
     return ends
 
 
+def _heading_pieces(item: Item, group: list[Line], lh: float) -> list[tuple[Item, list[Line]]] | None:
+    """A heading line the model gave as one item though it is printed in pieces far apart (the running
+    head "HER (679) HER", the foot "VOL. I. | 10 U | offerings,"): one heading per piece, each with the
+    words its OCR reads (None to keep it whole: one piece, two rows, or a piece left without words).
+    As one item it was letter-spaced across the page, "V O L . I . 1 0 U o f f e r i n g s", p. 1026."""
+    if item.kind != "heading" or len(group) < 2:
+        return None
+    pieces = sorted(group, key=lambda l: l.box.x0)
+    if max(l.box.y0 for l in pieces) - min(l.box.y0 for l in pieces) > 0.8 * lh:
+        return None  # (two rows: a title over two lines)
+    if max(b.box.x0 - a.box.x1 for a, b in zip(pieces, pieces[1:])) < 3 * lh:
+        return None  # (pieces close together: one line Vision cut, "(10" and ")")
+    keys = [[_norm_word(w) for w in l.text.split()] for l in pieces]
+    owner, last = [], 0
+    for w in item.text.split():
+        k = _norm_word(plain(w))
+        hit = next((i for i in range(last, len(pieces)) if k and k in keys[i]), None)
+        if hit is not None:
+            keys[hit].remove(k)
+            last = hit
+        owner.append(last)
+    words = item.text.split()
+    texts = [" ".join(w for w, o in zip(words, owner) if o == i) for i in range(len(pieces))]
+    if any(not plain(t).strip() for t in texts):
+        return None
+    return [(replace(item, text=clean_marks(t), lines=[l.id]), [l]) for t, l in zip(texts, pieces)]
+
+
 def _opening_line(text: str, group: list[Line]) -> Line | None:
     """The line of `group` that reads the first words of `text` (two of its first three among the
     line's first six), the topmost if several; None if none does. The model may list a later line
@@ -1726,7 +1754,8 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
       group_all = [by_id[i] for i in whole.lines if i in by_id]
       if not group_all or not plain(whole.text).strip():
           continue
-      parts = column_parts(whole, group_all, layout.line_height) if whole.kind in ("paragraph", "note") else [(whole, group_all)]
+      parts = column_parts(whole, group_all, layout.line_height) if whole.kind in ("paragraph", "note") else \
+          (_heading_pieces(whole, group_all, layout.line_height) or [(whole, group_all)])
       for part_no, (item, group) in enumerate(parts):
         zone = zones.get(item.zone)
         if zone is None:
