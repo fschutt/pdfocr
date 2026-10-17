@@ -966,6 +966,18 @@ def unread_ink(layout: PageLayout, lines: list[Line], prev: list[Line], lh: floa
         # few px stood for a Hebrew note, which was set in the paragraph's first lines, p. 106)
         tx0, tx1 = min(l.box.x0 for l in prev), max(l.box.x1 for l in prev)
         after = [r for r in after if r[-1].x1 < tx0 + lh or r[0].x0 > tx1 - lh]
+    # (not ink inside a line of text, its line end Vision's box left out: "לא תערך לה כתם" was set
+    # there, 40 pt wide, at the right edge of the column whose left margin its notes stand in, p. 945)
+    long_ = [l.box for l in lines if len(l.text) >= 25]
+    after = [r for r in after if not any(b.x0 <= (r[0].x0 + r[-1].x1) / 2 <= b.x1 and abs(b.y0 - r[0].y0) < 1.5 * lh for b in long_)]
+    if prev and max(l.box.x1 for l in prev) - min(l.box.x0 for l in prev) < 10 * lh:
+        # (after a margin note: in its margin, if there is any there)
+        mx0, mx1 = min(l.box.x0 for l in prev) - 2 * lh, max(l.box.x1 for l in prev) + 2 * lh
+        same = [r for r in after if min(r[-1].x1, mx1) > max(r[0].x0, mx0)]
+        after = same or after
+    if prev:
+        # (near it: one 20 lines below was another's, p. 945)
+        after = [r for r in after if r[0].y0 < max(l.box.y1 for l in prev) + 12 * lh]
     if not after:
         return None
     run = min(after, key=lambda r: (r[0].y0 >= py + 0.6 * lh, r[0].y0, r[0].x0))
@@ -1087,6 +1099,42 @@ def split_across(items: list[Item], lines: list[Line], layout: PageLayout, ink=N
     return out
 
 
+# a sheet's signature at the page's foot ("5 X", "O o", "H", "VOL. I."): no catchword, it stands apart
+SIGNATURE = re.compile(r"^(?:\d+\s*[A-Z]{1,2}|[A-Z]|[A-Z]\s+[A-Za-z]|[Vv][Oo][Ll]\.?\s*[Ii]+\.?)$")
+
+
+def catchword_ink(layout: PageLayout, lines: list[Line], prev: list[Line], lh: float) -> tuple[Box, list] | None:
+    """Where a word the OCR did not read stands under the last line of the paragraph before it, in
+    that paragraph's right half: a catchword (the next page's first word, under a column's last line,
+    "of", "We"), which Vision leaves unread; the inked words (OpenCV) no OCR word covers on the first
+    such row. None if there are none."""
+    last = max(prev, key=lambda l: l.box.y1)
+    px0, px1 = min(l.box.x0 for l in prev), max(l.box.x1 for l in prev)
+    covered = [b for l in lines for _, b in l.words]
+    # (a word box Vision ran down over the catchword below it, "Exportation" 83 pt tall for 45, p. 356:
+    # as tall as the others)
+    hs = sorted(b.h for b in covered)
+    usual = hs[len(hs) // 2] if hs else 0
+    covered = [Box(b.x0, b.y0, b.x1, b.y0 + int(1.1 * usual)) if usual and b.h > 1.4 * usual else b for b in covered]
+    covered += [l.box for l in lines if not l.words]  # (and the ink an item placed before took: one word, one item)
+    free = [w for w in layout.words if (last.box.y0 + last.box.y1) / 2 < w.y0 <= last.box.y1 + 2.5 * lh
+            and (px0 + px1) / 2 <= (w.x0 + w.x1) / 2 <= px1 + lh and w.h >= 0.5 * lh and not any(
+                c.x0 - 0.2 * lh <= (w.x0 + w.x1) / 2 <= c.x1 + 0.2 * lh and c.y0 - 0.2 * lh <= (w.y0 + w.y1) / 2 <= c.y1 + 0.2 * lh
+                for c in covered)]
+    if not free:
+        return None
+    top = min(w.y0 for w in free)
+    # (the words at the row's right end, a gap of less than 1.5 lines between them: a speck further
+    # left set "The" 280 pt wide, p. 1024)
+    row = sorted((w for w in free if w.y0 < top + 0.6 * lh), key=lambda w: -w.x1)
+    box = row[0]
+    for w in row[1:]:
+        if box.x0 - w.x1 > 1.5 * lh:
+            break
+        box = box.union(w)
+    return box, []
+
+
 def margin_rows(ink, x0: int, x1: int, y0: int, y1: int, lh: float, pitch: float = 0.0) -> list[tuple[int, int]]:
     """The printed rows in a margin's strip x0..x1 between y0 and y1 (native px): runs of inked pixel
     rows, a gap of less than a quarter line inside one, specks (under 0.4 of a line) left out; a run
@@ -1162,6 +1210,7 @@ def place_lineless(items: list[Item], lines: list[Line], layout: PageLayout, ink
                 free.append((t, b))
         loose.append(replace(l, words=free))
     prev_kind = prev_label = ""
+    prev_para: list[Line] = []  # the last paragraph's lines, the OCR's own
     zone_ids = {z.id for z in layout.zones}
     # how many characters a margin note's printed line holds (those the OCR read), and how far apart
     # its rows are: a note placed under the one before it takes as many rows as its text needs
@@ -1182,8 +1231,25 @@ def place_lineless(items: list[Item], lines: list[Line], layout: PageLayout, ink
             own = []
         if own:
             prev, prev_kind, prev_label = own, item.kind, item.label
+            if item.kind == "paragraph" and not any(l.id.startswith("X") for l in own):
+                prev_para = own
             continue
-        hit = locate(item.text, loose, lh)
+        # a catchword first by the ink under the paragraph before it: a word as common as "for" or
+        # "Jews" is found in the text (mid-column, over a paragraph, p. 384, 960)
+        short = item.kind in ("paragraph", "heading") and prev_para and len(plain(item.text).split()) <= 2 \
+            and len(plain(item.text)) <= 15 and not SIGNATURE.match(plain(item.text).strip())
+        cw = catchword_ink(layout, lines + made, prev_para, lh) if short else None
+        if cw is None and short and k == len(items) - 1 and lines:
+            # the page's last item, a word the OCR did not read where a catchword stands (Vision
+            # read "Jews" into the last footnote's line): at the page's foot, right, not where its
+            # word is found in the text (over a paragraph, p. 960)
+            hs = sorted(l.box.h for l in lines)
+            h = hs[len(hs) // 2]
+            ends = sorted(l.box.x1 for l in lines if len(l.text) >= 25) or sorted(l.box.x1 for l in lines)
+            right = ends[int(0.85 * (len(ends) - 1))]
+            bottom = max(l.box.y1 for l in lines)
+            cw = (Box(int(right - 0.45 * h * len(plain(item.text))), int(bottom + 0.2 * lh), int(right), int(bottom + 0.2 * lh + h)), [])
+        hit = cw or locate(item.text, loose, lh)
         if not hit and item.kind == "note":
             # its words among those the texts account for (the paragraph's own "Book of Judith" took
             # the margin's "Judith" of the line Vision ran the note into, p. 375): where all the
@@ -1347,12 +1413,19 @@ def own_extent(text: str, group: list[Line]) -> Box | None:
 def _rows(group: list[Line], lh: float) -> list[list[float]]:
     """`group`'s printed lines, their pieces joined: [x0, x1, y0] each, top to bottom."""
     rows: list[list[float]] = []
+    bottom = 0.0  # (the last row's lowest line end)
     for l in sorted(group, key=lambda l: l.box.y0):
-        if rows and l.box.y0 - rows[-1][2] <= 0.5 * lh:
+        # (or its top half in the row: a table's year "62", its own piece 15 pt below the row's top,
+        # made a row of its own, the row's measure the length of a short piece, 289 pt for 641, p. 744)
+        tall = min(bottom - rows[-1][2], 1.3 * l.box.h) if rows else 0.0
+        if rows and (l.box.y0 - rows[-1][2] <= 0.5 * lh
+                     or (l.box.y0 + 0.5 * l.box.h < rows[-1][2] + tall and l.box.y0 < rows[-1][2] + 0.5 * tall)):
             rows[-1][0] = min(rows[-1][0], l.box.x0)
             rows[-1][1] = max(rows[-1][1], l.box.x1)
+            bottom = max(bottom, l.box.y1)
         else:
             rows.append([l.box.x0, l.box.x1, l.box.y0])
+            bottom = l.box.y1
     return rows
 
 
@@ -1479,7 +1552,8 @@ def _majority_zone(group: list[Line], default: str) -> str:
     return max(counts, key=counts.get) if counts else default
 
 
-FOOT_MARK = re.compile(r"\s*(?:<sup>[^<]{1,3}</sup>|<i>[a-z]</i>\s|[ᵃᵇᶜᵈᵉᶠᵍʰⁱʲᵏˡᵐⁿᵒᵖʳˢᵗᵘᵛʷˣʸᶻ*†‡§‖¶])")
+# (º and ª too: the model's "º" for a raised o, p. 66, left the footnotes' first row a paragraph over them)
+FOOT_MARK = re.compile(r"\s*(?:<sup>[^<]{1,3}</sup>|<i>[a-z]</i>\s|[ᵃᵇᶜᵈᵉᶠᵍʰⁱʲᵏˡᵐⁿᵒᵖʳˢᵗᵘᵛʷˣʸᶻºª*†‡§‖¶])")
 # a footnote's mark as a letter by itself before a capital ("k Herod. l. i. c. 181.", p. 313): no
 # paragraph starts so (a margin note may: "a Genes. ii. 13.")
 LETTER_MARK = re.compile(r"\s*[a-z] (?:<i>)?[A-Z\u0590-\u05ff]")
@@ -1638,7 +1712,19 @@ def set_footnotes(blocks: list[Block], by_id: dict, lh: float, px: float) -> Non
         band.append(l)
         last = l.box.y0 if last is None else min(last, l.box.y0)
     lines = band
-    x0, x1 = min(l.box.x0 for l in lines), max(l.box.x1 for l in lines)
+    # (its edges where its rows start and end, not a margin piece among them: "Æra 1285. xxvii." set
+    # the block's left 140 pt into the margin, under a chronology note, p. 778)
+    grouped: list[list[Line]] = []
+    for l in sorted(lines, key=lambda l: l.box.y0):
+        if grouped and l.box.y0 - grouped[-1][0].box.y0 <= 0.5 * lh:
+            grouped[-1].append(l)
+        else:
+            grouped.append([l])
+    starts = sorted(min(l.box.x0 for l in r) for r in grouped)
+    ends = sorted(max(l.box.x1 for l in r) for r in grouped)
+    s0, s1 = starts[len(starts) // 2], ends[len(ends) // 2]
+    x0 = min((l.box.x0 for l in lines if l.box.x0 >= s0 - 2 * lh), default=min(l.box.x0 for l in lines))
+    x1 = max((l.box.x1 for l in lines if l.box.x1 <= s1 + 2 * lh), default=max(l.box.x1 for l in lines))
     top = min(l.box.y0 for l in lines)
     tops = sorted({l.box.y0 for l in lines})
     rows: list[float] = []
@@ -1734,8 +1820,12 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
         # 253, 284, 370, 731: they stood apart, over the footnotes' block)
         x0, x1 = min(l.box.x0 for l in g), max(l.box.x1 for l in g)
         lh_ = layout.line_height
+        # (by its middle: a margin piece Vision ran a little into the text, "Æra 1285. xxvii.", is in
+        # the margin all the same, p. 778)
+        cx = (x0 + x1) / 2
         return it.kind == "note" and x1 - x0 < 0.2 * layout.width and (
-            (x1 < 0.22 * layout.width and x1 < text_left + lh_) or (x0 > 0.78 * layout.width and x0 > text_right - lh_))
+            (x1 < 0.22 * layout.width and (x1 < text_left + lh_ or cx < text_left))
+            or (x0 > 0.78 * layout.width and (x0 > text_right - lh_ or cx > text_right)))
 
     for it in items:
         g = [by_id[i] for i in it.lines if i in by_id and not i.startswith("X")]
@@ -2190,7 +2280,10 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
                 # its words are not on its lines (the model read the note from the scan and gave
                 # it a line of the text beside it): the margin the column's other notes stand in
                 # (not one placed in its margin under the note before it)
-                same = [nt for nt in inner_notes if zone.box.x0 - layout.line_height <= (nt[0] + nt[2]) / 2 <= zone.box.x1]
+                # (on its side: a note of the right edge 40 pt wide took "Herodot. l. 3. c. 94.", read
+                # in the left margin, over the text's line ends, p. 945)
+                same = [nt for nt in inner_notes if zone.box.x0 - layout.line_height <= (nt[0] + nt[2]) / 2 <= zone.box.x1
+                        and nt[5] == side]
                 if same:
                     gx0, _, gx1, _ = min(same, key=lambda nt: abs(nt[1] - first.box.y0))[:4]
             # its margin, never into a column's text
@@ -2246,6 +2339,11 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
             one_line = len(rows) == 1 and zone.role in ("column", "text")
             # nor do lines that hold less than half its text (the model read the rest from the scan)
             read_elsewhere = len(plain(item.text)) > 2 * sum(len(l.text) for l in group) and zone.role in ("column", "text")
+            if one_line and measure is None and sum(len(l.text) for l in group) >= 0.8 * len(plain(item.text)) \
+                    and right < ex1 <= right + 0.05 * (right - left):
+                # (but its one line, all of its text, is room enough for it: a list's entry printed 17 pt
+                # past its zone's end wrapped, and every entry below it flowed a row down, p. 333)
+                right = ex1 + 0.02 * (ex1 - ex0)
             # nor, in a column whose measure is known, lines wider than it (pieces of the next
             # column's line Vision ran into it: p. 165)
             too_wide = measure is not None and ex1 - ex0 > right - left
@@ -2919,8 +3017,13 @@ def fit_round(target: Path, page_blocks: dict[int, list[Block]], pages_meta: lis
             shift = over + 0.15 * chain[0][0].size
             last, dlast = max(chain, key=lambda t: t[1]["y1"])
             if dlast["y1"] + shift <= min(last.limit, report["height_pt"]) + 0.2 * last.size:
-                for b, _ in chain:
+                for b, db in chain:
                     b.y += shift
+                    # (and its drawn text with it: a second move in the same round checked the room
+                    # against where the first left it, not against the render, and two moves of 21
+                    # and 24 pt set a catchword 0.5 em into the footnotes, p. 88)
+                    db["y0"] += shift
+                    db["y1"] += shift
                     b.limit = max(b.limit, b.limit + shift) if b is not last else b.limit
                 a.limit = max(a.limit, chain[0][0].y)
                 shrunk[p["page_num"]] = shrunk.get(p["page_num"], 0) + len(chain)
