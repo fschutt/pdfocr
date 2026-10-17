@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import html as htmlmod
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -1644,7 +1645,9 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
                 # letter-spaced (D I C T I O N A R Y): the size of its glyphs, the rest of the
                 # printed width between the letters
                 letters = [c for c in label if c.isalpha()]
-                caps = sum(c.isupper() for c in letters) >= 0.5 * max(len(letters), 1)
+                # (figures stand about as tall as capitals: "( 267 )" measured by its x-height was
+                # set at 103 pt over the column below it, "BEA" beside it at 64, p. 305)
+                caps = sum(c.isupper() for c in letters) >= 0.5 * len(letters) if letters else True
                 em = first.glyph * px / (TYPEFACE.get("cap", TIMES_CAP) if caps else TYPEFACE.get("x", TIMES_X))
                 natural = face.text_length(label, em)
                 if natural < w:
@@ -2168,7 +2171,8 @@ def _block(item: Item, x: float, y: float, w: float, size: float, line_h: float,
 # --- the pipeline ----------------------------------------------------------------------------
 
 
-HTML2PDF = Path(__file__).resolve().parents[2] / "html2pdf" / "target" / "release" / "html2pdf"
+# (PDF_OCR_HTML2PDF: another build, e.g. one against a newer azul, tried on a sample first)
+HTML2PDF = Path(os.environ.get("PDF_OCR_HTML2PDF") or Path(__file__).resolve().parents[2] / "html2pdf" / "target" / "release" / "html2pdf")
 WORD_LIST = "/usr/share/dict/words"
 MIN_FIT = 0.7  # the fit loop sets a block at most this much smaller than it started
 
@@ -2292,11 +2296,10 @@ def fit_round(target: Path, page_blocks: dict[int, list[Block]], pages_meta: lis
             ratio = 1.0
             # text may reach half a line into the next block (its first line's OCR box is a few
             # px higher or lower than where its line box begins), never past the page
-            slack = 0.0 if block.limit >= report["height_pt"] - 1 else 0.5 * block.line_h
-            if any(o.item.kind == "heading" and abs(o.y - block.limit) < 1.0 for o in regions):
-                # (not into a heading: the footnotes' last row over the signature "VOL. I." at the
-                # page's foot, p. 432)
-                slack = 0.15 * block.line_h
+            # (0.15 of a line: half a line, as before, left a paragraph's last line over the first
+            # of the entry below it, its descenders on that one's capitals, 25-30 to a 31-page
+            # sample; into a heading: the footnotes' last row over the signature "VOL. I.", p. 432)
+            slack = 0.0 if block.limit >= report["height_pt"] - 1 else 0.15 * block.line_h
             if rendered["y1"] > block.limit + slack:
                 # fewer, smaller lines (a smaller heading line): the ratio of the room to what it took
                 took = max(rendered["y1"] - block.y, 1.0)

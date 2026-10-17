@@ -30,6 +30,9 @@ LIGATURES = ("ſſi", "ſſl", "ffi", "ffl", "ſſ", "ſt", "ſi", "ſl", "ſh",
 # the ligatures the compositor set as a rule (vol. 1: joined some 5 to 10 times for each time apart;
 # ſi was set apart four times in five)
 SET_LIGATURES = ("ffi", "ffl", "ff", "fi", "fl", "ct", "ſſi", "ſſ", "ſt", "ſl", "ſh")
+# glyphs of two pieces one above the other, whose upper one Vision's box may leave out (vol. 1: the
+# average ";" kept its comma and a sliver of its dot, the italic ":" one dot)
+TWO_PIECES = set(";:!?")
 # letters set as one piece that the prints may not give: of their two letters
 COMPOSED = {"æ": "ae", "œ": "oe", "Æ": "AE", "Œ": "OE"}
 # a long s before any letter but these (and round at a word's end, before an apostrophe): vol. 1,
@@ -463,13 +466,18 @@ def _choose(glyphs: list[tuple], most: int, seed: int = 1) -> dict[str, list[tup
     return {c: (rng.sample(v, most) if len(v) > most else v) for c, v in by.items()}
 
 
-def _print_of(ink, labels, stats, box, base: float, em: float, others=()):
+def _print_of(ink, labels, stats, box, base: float, em: float, others=(), up: float = 0.0):
     """One print on the canvas: its ink (the pieces whose middle is in its box, and nearer its
     middle than the middle of a neighbour's box that has it too: an italic f's box reaches over
-    the next letter), scaled to EM_PX, its baseline on BASE_ROW, its middle (of ink) on MID_COL."""
+    the next letter), scaled to EM_PX, its baseline on BASE_ROW, its middle (of ink) on MID_COL.
+    `up` (em): the box reaches that far above the baseline at least, and a third of it below (a
+    glyph of two pieces whose box Vision drew round one of them: the comma of a ";" or its dot,
+    the stroke of an italic "!")."""
     import cv2
 
     x0, y0, x1, y1 = box
+    if up:
+        y0, y1 = min(y0, int(base - up * em)), max(y1, int(base + up / 3 * em))
     pad = 3
     crop_labels = labels[max(0, y0 - pad):y1 + pad, max(0, x0 - pad):x1 + pad]
 
@@ -521,7 +529,8 @@ def shapes(pages: list[dict], dirs: list[Path], most: int = 200, least: int = 12
             if raw is None:
                 continue
             others = [tuple(rows[(g[7], g[8] + d)][2:6]) for d in (-1, 1) if (g[7], g[8] + d) in rows]
-            canvas = _print_of(ink, labels, stats, tuple(raw[2:6]), raw[6], page["pitch"], others)
+            canvas = _print_of(ink, labels, stats, tuple(raw[2:6]), raw[6], page["pitch"], others,
+                               up=0.8 if key[1] in TWO_PIECES else 0.0)
             if canvas is not None:
                 prints[key].append(canvas)
         if (n + 1) % 100 == 0:
