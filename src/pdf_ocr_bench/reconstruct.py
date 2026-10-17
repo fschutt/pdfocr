@@ -1782,9 +1782,14 @@ def set_footnotes(blocks: list[Block], by_id: dict, lh: float, px: float, text_e
     x1 = max((l.box.x1 for l in lines if l.box.x1 <= s1 + 2 * lh), default=max(l.box.x1 for l in lines))
     top = min(l.box.y0 for l in lines)
     tops = sorted({l.box.y0 for l in lines})
+    # (a row by its lines' own height: footnotes set in two or three columns stand a few px apart, and
+    # with half the page's line height (12 px) each was a row, 11 rows 18 pt apart for 4, set at 18 pt
+    # for 33, p. 106)
+    hs = sorted(l.box.h for l in lines)
+    row_gap = max(0.5 * lh, 0.6 * hs[len(hs) // 2])
     rows: list[float] = []
     for t in tops:
-        if not rows or t - rows[-1] > 0.5 * lh:
+        if not rows or t - rows[-1] > row_gap:
             rows.append(t)
     steps = sorted(b2 - a for a, b2 in zip(rows, rows[1:]))
     first = foot[0]
@@ -2236,6 +2241,8 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
         all_steps += [b.box.y0 - a.box.y0 for a, b in zip(g, g[1:]) if 0.5 * layout.line_height < b.box.y0 - a.box.y0 < 4 * layout.line_height]
     page_step = sorted(all_steps)[len(all_steps) // 2] if all_steps else 0.0
     page_line_h = sorted(all_heights)[len(all_heights) // 2] if all_heights else 1e9
+    real_h = sorted(l.box.h for l in lines if not l.id.startswith("X") and len(l.text) >= 4)
+    all_line_h = real_h[int(0.3 * len(real_h))] if real_h else 0.0  # (a plate's title is no usual line)
 
     for whole in items:
       group_all = [by_id[i] for i in whole.lines if i in by_id]
@@ -2334,11 +2341,29 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
             above = [b for b in blocks if b.item is not None and b.item.kind == "heading" and b.nowrap and b.y < top
                      and min(b.x + b.w, x0 + w) > max(b.x, x0)]
             near = max(above, key=lambda b: b.y).size if above else None
-            if near and all(l.id.startswith("X") for l in group):
+            lineless = all(l.id.startswith("X") for l in group)
+            xheight_only = False
+            if near and lineless:
                 # no OCR line of its own: the size of the heading line above it, not of the box made for it
                 # under that one ("Curiosities of the JEWS." at 18.7 pt among lines of 40-53, p. 2)
                 size0 = near
+            elif lineless and all_line_h:
+                size0 = all_line_h * px / 1.05  # (or the page's usual line, with no heading above it: "P. 233." at 15.7, p. 268)
+            letters_ = [c for c in label if c.isalpha()]
+            if letters_ and all(c in "acemnorsuvwxz" for c in letters_) and first.glyph and not first.spacing > SPACED:
+                # x-height letters only ("con-", "more"): Vision's box is that short, its size is its glyphs'
+                # (23 pt for catchwords of text at 42, p. 891, 926)
+                size0 = max(size0, first.glyph * px / TYPEFACE.get("x", TIMES_X))
+                xheight_only = True
             fits = w / max(face.text_length(label, 1.0), 0.1)  # (the size that sets it in one row)
+            if fits < 0.6 * (near or size0) and len(label.split()) <= 3 and not all(l.id.startswith("X") for l in group):
+                # a short line whose OCR box is too narrow for it (a piece of it read, or misread): the size
+                # of its glyphs' box, no larger than the page's text, out past its box ("P. 514." at 11 pt,
+                # catchwords "con-", "more" at 23 pt for text of 42, p. 518, 891, 926)
+                size = min(size0, page_line_h * px / 1.05) if page_line_h < 1e8 else size0
+                natural = face.text_length(label, size)
+                blocks.append(Block(item, x0, top, max(w, natural) * 1.02, size, 1.2 * size, "left", nowrap=True))
+                continue
             if fits < 0.6 * (near or size0):
                 # a text of several printed rows the model gave as one heading line (Vision read one of its
                 # three rows, garbled): wrapped at its box's width, at the size of the heading line above it,
@@ -2347,7 +2372,7 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
                 blocks.append(Block(item, x0, top, max(w, 1.0) * 1.02, size, 1.2 * size,
                                     item.align if item.align in ("center", "right") else "left"))
                 continue
-            size = min(1.1 * size0, w / max(face.text_length(label, 1.0), 0.1))
+            size = min((1.0 if xheight_only else 1.1) * size0, w / max(face.text_length(label, 1.0), 0.1))
             if near and all(l.id.startswith("X") for l in group):
                 # (as the line above it, centred in the box made for it: no box of its own says more)
                 size = min(near, fits)
