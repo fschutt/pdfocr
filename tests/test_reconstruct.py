@@ -496,3 +496,25 @@ def test_margin_rows_are_the_printed_rows_and_notes_set_row_against_row_are_cut_
     ink[500:503, 20:30] = 1  # a speck
     assert margin_rows(ink, 0, 200, 0, 600, 25) == [(100, 125), (300, 380)]
     assert margin_rows(ink, 0, 200, 0, 600, 25, pitch=40) == [(100, 125), (300, 340), (340, 380)]
+
+
+def test_a_line_vision_ran_over_the_gutter_is_split_at_the_white_between_the_columns():
+    from pdf_ocr_bench.reconstruct import split_across
+
+    layout = PageLayout(width=2000, height=1000, line_height=25)
+    ink = np.zeros((1000, 2000), np.uint8)
+    for y in range(100, 700, 50):  # two columns of print, white between 960 and 1010
+        ink[y:y + 25, 100:950] = 1
+        ink[y:y + 25, 1020:1900] = 1
+    text_l = "Now it so fell out, that the King of"
+    text_r = "he would please to communicate his Spirit"
+    merged = (text_l + " " + text_r).split()
+    words = [(w, Box(100 + 95 * k, 300, 180 + 95 * k, 325)) for k, w in enumerate(merged)]
+    lines = [Line("L1", " ".join(merged), Box(100, 300, 1900, 325), words, "text0"),
+             Line("L2", "the narrow line of the left column here", Box(100, 350, 950, 375), [], "column0"),
+             Line("L3", "a line of the right column standing here", Box(1020, 250, 1900, 275), [], "column1")]
+    items = [Item("column0", text_l + " Persia some time after sent Jews the narrow line of the left column here", ["L1", "L2"]),
+             Item("column1", "a line of the right column standing here that " + text_r + " to him", ["L3"])]
+    out = {l.id: l for l in split_across(items, lines, layout, ink)}
+    assert items[0].lines == ["L1-L", "L2"] and items[1].lines == ["L3", "L1-R"]
+    assert out["L1-L"].box.x1 <= 960 and out["L1-R"].box.x0 >= 1005

@@ -730,8 +730,11 @@ def _lead_words(text: str, top: Line) -> int:
     """How many words of `text` come before the first one the OCR line `top` read: where the
     most of its words follow one another in the text (its first word may be the end of one the
     print divided: "fore the" of "be-fore the"); 0 if fewer than two of them do."""
-    words = [_norm_word(plain(w)) for w in text.split()]
-    read = [k for k in (_norm_word(w) for w in top.text.split()) if k]
+    # (æ and œ as e: "Æra" was "ra" and Vision's "Era" "era", and a chronology note read only on its
+    # last line, "Era 4.", hung from it four lines low, over the entry below, p. 799)
+    lig = str.maketrans({"æ": "e", "Æ": "E", "œ": "e", "Œ": "E"})
+    words = [_norm_word(plain(w).translate(lig)) for w in text.split()]
+    read = [k for k in (_norm_word(w.translate(lig)) for w in top.text.split()) if k]
     if not read:
         return 0
     best, at = 0, 0
@@ -952,6 +955,118 @@ def unread_ink(layout: PageLayout, lines: list[Line], prev: list[Line], lh: floa
     return box, []
 
 
+def split_across(items: list[Item], lines: list[Line], layout: PageLayout, ink=None) -> list[Line]:
+    """Lines Vision ran over the gutter (a row of the left column and the row beside it of the right
+    one, read as one line: "Now it so fell out, that the King of he would please to communicate his
+    Spirit"), split where the scan's white between the columns is: each piece to the item whose text
+    reads it. As one line, the left column's paragraph was set across both columns, and the right
+    one's had four rows too few, over the paragraph below it (p. 632). `items`' lines are changed."""
+    import difflib
+
+    widths = sorted(l.box.w for l in lines if len(l.text) >= 20)
+    if not widths:
+        return lines
+    wide = widths[len(widths) // 2]
+    lh = layout.line_height
+    owner: dict[str, int] = {}
+    for k, it in enumerate(items):
+        for i in it.lines:
+            owner.setdefault(i, k)
+    texts = [[_norm_word(plain(w)) for w in it.text.split()] for it in items]
+
+    def read(piece: list[str], k: int) -> float:
+        # how much of `piece` item k's text reads, in order
+        if not piece:
+            return 0.0
+        m = difflib.SequenceMatcher(None, piece, texts[k], autojunk=False)
+        return sum(n for _, _, n in m.get_matching_blocks()) / len(piece)
+
+    out: list[Line] = []
+    cuts: list[tuple[float, float]] = []
+    for l in lines:
+        k = owner.get(l.id)
+        words = [(t, b) for t, b in l.words if _norm_word(t)]
+        if k is None or l.box.w < 1.4 * wide or len(words) < 6 or items[k].kind != "paragraph":
+            out.append(l)
+            continue
+        keys = [_norm_word(t) for t, _ in words]
+        best = None
+        for j in range(3, len(keys) - 2):
+            left, right = keys[:j], keys[j:]
+            mine_l, mine_r = read(left, k), read(right, k)
+            for m, it in enumerate(items):
+                if m == k or it.kind != "paragraph":
+                    continue
+                # (the item that lists it reads one piece, another item the other, and not both; the
+                # other's clearly, four words at least: its own may be misread, "Pera lome time atter")
+                if mine_l >= 0.3 and mine_r <= 0.35 and len(right) >= 4 and (f := read(right, m)) >= 0.7:
+                    score = (mine_l + f, j, m, "right")
+                elif mine_r >= 0.3 and mine_l <= 0.35 and len(left) >= 4 and (f := read(left, m)) >= 0.7:
+                    score = (mine_r + f, j, m, "left")
+                else:
+                    continue
+                if best is None or score[0] > best[0]:
+                    best = score
+        if best is None:
+            out.append(l)
+            continue
+        _, j, m, other = best
+        # where the white between the columns is, near the word the pieces meet at
+        guess = (words[j - 1][1].x1 + words[j][1].x0) / 2
+        cut0 = cut1 = guess
+        if ink is not None:
+            # (white over the rows above and below it too: a word space is white in one row, a gutter
+            # in all of them)
+            crop = ink[max(0, int(l.box.y0 - 10 * lh)):int(l.box.y1 + 10 * lh), max(0, l.box.x0):l.box.x1]
+            if crop.size:
+                white = crop.sum(axis=0) <= 2
+                runs, start = [], None
+                for i, w in enumerate(list(white) + [False]):
+                    if w and start is None:
+                        start = i
+                    elif not w and start is not None:
+                        if i - start >= 0.5 * lh:
+                            runs.append((l.box.x0 + start, l.box.x0 + i))
+                        start = None
+                # (the widest: a gutter is wider than the word spaces of a justified line beside it)
+                near = [r for r in runs if abs((r[0] + r[1]) / 2 - guess) < 12 * lh]
+                if near:
+                    cut0, cut1 = max(near, key=lambda r: r[1] - r[0])
+        if cut0 == guess:
+            # (no white there, a rule or a note in the gutter: between the columns the layout found beside it)
+            gaps = [(a.box.x1, b.box.x0) for a in layout.zones for b in layout.zones
+                    if a.role == b.role == "column" and 0 <= b.box.x0 - a.box.x1 < 4 * lh
+                    and a.box.y0 - lh < l.box.y1 and l.box.y0 < a.box.y1 + lh and b.box.y0 - lh < l.box.y1 and l.box.y0 < b.box.y1 + lh
+                    and abs((a.box.x1 + b.box.x0) / 2 - guess) < 12 * lh]
+            if gaps:
+                cut0, cut1 = min(gaps, key=lambda g: abs((g[0] + g[1]) / 2 - guess))
+            elif found := [c for c in cuts if abs((c[0] + c[1]) / 2 - guess) < 12 * lh]:
+                # (or the gutter another line of the page was split at)
+                cut0, cut1 = min(found, key=lambda c: abs((c[0] + c[1]) / 2 - guess))
+        else:
+            cuts.append((cut0, cut1))
+        a = replace(l, id=f"{l.id}-L", text=" ".join(t for t, _ in words[:j]), box=Box(l.box.x0, l.box.y0, int(cut0), l.box.y1),
+                    words=[(t, b) for t, b in l.words if (b.x0 + b.x1) / 2 < guess])
+        b = replace(l, id=f"{l.id}-R", text=" ".join(t for t, _ in words[j:]), box=Box(int(cut1), l.box.y0, l.box.x1, l.box.y1),
+                    words=[(t, b) for t, b in l.words if (b.x0 + b.x1) / 2 >= guess])
+        mine, theirs = (a, b) if other == "right" else (b, a)
+        items[k].lines = [mine.id if i == l.id else i for i in items[k].lines]
+        # (among the other item's lines: after the last of its column above it, else before the first
+        # of its column; its column's, by the narrower of two lines: not a line over the gutter yet unsplit)
+        ids = [i for i in items[m].lines if i != l.id]
+        by_id = {o.id: o for o in lines + out}
+
+        def same_column(o: Line) -> bool:
+            return min(o.box.x1, theirs.box.x1) - max(o.box.x0, theirs.box.x0) > 0.5 * min(o.box.w, theirs.box.w) \
+                and o.box.w < 1.4 * wide
+        column = [n for n, i in enumerate(ids) if i in by_id and same_column(by_id[i])]
+        above = [n for n in column if by_id[ids[n]].box.y0 < theirs.box.y0]
+        at = max(above) + 1 if above else (min(column) if column else len(ids))
+        items[m].lines = ids[:at] + [theirs.id] + ids[at:]
+        out += [a, b]
+    return out
+
+
 def margin_rows(ink, x0: int, x1: int, y0: int, y1: int, lh: float, pitch: float = 0.0) -> list[tuple[int, int]]:
     """The printed rows in a margin's strip x0..x1 between y0 and y1 (native px): runs of inked pixel
     rows, a gap of less than a quarter line inside one, specks (under 0.4 of a line) left out; a run
@@ -1041,10 +1156,42 @@ def place_lineless(items: list[Item], lines: list[Line], layout: PageLayout, ink
     note_pitch = note_steps[len(note_steps) // 2] if len(note_steps) >= 2 else 1.6 * lh
     for k, item in enumerate(items):
         own = [l for l in lines + made if l.id in item.lines]
+        if own and item.kind == "note" and not any(c.isalnum() for l in own for c in l.text):
+            # a note whose lines read nothing (a speck "•" in the gutter for "Judith vii. 3. in Syriaco.",
+            # which Vision ran into the text's lines in the other margin, p. 375): placed by its words
+            own = []
         if own:
             prev, prev_kind, prev_label = own, item.kind, item.label
             continue
         hit = locate(item.text, loose, lh)
+        if not hit and item.kind == "note":
+            # its words among those the texts account for (the paragraph's own "Book of Judith" took
+            # the margin's "Judith" of the line Vision ran the note into, p. 375): where all the
+            # lines read them, if they stand beyond the rest of the words of their lines, in a margin
+            whole = locate(item.text, lines, lh)
+            if whole:
+                found = {id(b) for _, b in whole[1]}
+                beside = [b for l in lines if min(l.box.y1, whole[0].y1) - max(l.box.y0, whole[0].y0) > 0.3 * lh
+                          for _, b in l.words if id(b) not in found and min(b.y1, whole[0].y1) - max(b.y0, whole[0].y0) > 0.3 * lh]
+                hx0, hx1 = whole[0].x0, whole[0].x1
+                # (left margin: the rest of its lines' words end right of it, "Syri-mon," glued across
+                # its edge too; right margin: they start left of it. Not the text's own words, with
+                # words on both sides: "Idem. p. 274.", p. 641)
+                # (and outside the text: where the lines near it that hold none of its words start, or
+                # end; a reference at a line's start inside the column is no note)
+                near = [l for l in lines if abs(l.box.y0 - whole[0].y0) < 6 * lh and len(l.text) >= 25
+                        and not any(id(b) in found for _, b in l.words)]
+                starts = sorted(l.box.x0 for l in near if l.box.x0 > hx0 - lh)
+                ends = sorted(l.box.x1 for l in near if l.box.x1 < hx1 + lh)
+                left = starts and hx1 <= starts[len(starts) // 2] + 0.5 * lh and all(b.x1 > hx1 - 0.5 * lh for b in beside)
+                right = ends and hx0 >= ends[len(ends) // 2] - 0.5 * lh and all(b.x0 < hx0 + 0.5 * lh for b in beside)
+                # (and half its figures at least: "Luke i" of "Luke i. 36, 37." is no "Luke i. 5.", p. 605)
+                figures = [k for k in (_norm_word(w) for w in plain(item.text).split()) if k.isdigit()]
+                read = [k for k, _ in whole[1] if k.isdigit()]
+                if figures and sum(1 for k in figures if k in read) < 0.5 * len(figures):
+                    left = right = False
+                if beside and (left or right):
+                    hit = whole
         if item.kind == "note" and not hit and prev and item.label not in zone_ids \
                 and not (prev_kind == "note" and prev_label == item.label):
             # one the model put in a strip the page has not (its other margin, named "notes1" where
@@ -1531,6 +1678,10 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
     if text_zones:
         lines = [l if l.zone in kept else replace(l, zone=min(
             text_zones, key=lambda z: _distance(z.box, (l.box.x0 + l.box.x1) / 2, (l.box.y0 + l.box.y1) / 2)).id) for l in lines]
+    lines = split_across(items, lines, layout, ink)
+    if text_zones:  # (each piece in the zone it stands in)
+        lines = [l if not l.id.endswith(("-L", "-R")) else replace(l, zone=min(
+            text_zones, key=lambda z: _distance(z.box, (l.box.x0 + l.box.x1) / 2, (l.box.y0 + l.box.y1) / 2)).id) for l in lines]
     made, floating = place_lineless(items, lines, layout, ink)
     lines = lines + made
     by_id = {l.id: l for l in lines}
@@ -2006,17 +2157,20 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
                                       layout.line_height, n_rows, [w for l in group for w in l.words], item.text)
             measure = measure_for(ex0, ex1) if len(rows) >= 2 or zone.role in ("column", "text") else None
             widest = max((m1 - m0 for m0, m1 in columns_measured), default=0.0)
-            if measure is None and len(rows) == 1 and columns_measured and zone.box.w > 1.4 * widest:
+            if measure is None and columns_measured and zone.box.w > 1.4 * widest:
                 # a line in a band the layout cut across the columns (one Vision ran over the gutter): the
                 # column its own words stand in, not the band (p. 178: "As large black Eyes" drawn
-                # across both columns, 1409 pt wide)
+                # across both columns, 1409 pt wide). Lines of more rows too, when they all stand in
+                # that column (four rows of the left column whose text the model read in full, set
+                # 1558 pt wide over the right one's, p. 632; not a table's rows across it, p. 799)
                 own = own_words(item.text, group)
                 if own:
                     cx = sorted((b.x0 + b.x1) / 2 for _, b in own)[len(own) // 2]
                     # (a text column, not a table's narrow one: p. 799's genealogy)
                     col = next(((m0, m1) for m0, m1 in columns_measured
                                 if m1 - m0 >= 0.5 * widest and m0 - layout.line_height <= cx <= m1 + layout.line_height), None)
-                    if col is not None:
+                    lh_ = layout.line_height
+                    if col is not None and (len(rows) == 1 or all(col[0] - 2 * lh_ <= l.box.x0 and l.box.x1 <= col[1] + 2 * lh_ for l in group)):
                         measure = (col[0], col[1] + 0.01 * (col[1] - col[0]))
                         ex0, ex1 = max(ex0, col[0]), min(ex1, col[1])
             if measure is not None:
@@ -2168,13 +2322,16 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
     def margin_note(o: Block) -> bool:
         return o.item is not None and o.item.kind == "note" and "foot" not in o.item.label.lower()
 
-    for b in regions:
-        # (beside it, a few pt into its span, is not below it: a margin note set against a column)
-        below = [o.y for o in blocks if o is not b and o.y > b.y + 0.5 * b.line_h
-                 and min(b.x + b.w, o.x + o.w) - max(b.x, o.x) > 0.3 * max(b.size, 1.0)
-                 and not (o.item is not None and o.item.kind == "dropcap")  # a capital stands beside
-                 and not (margin_note(b) and margin_note(o))]
-        b.limit = min([height_pt, *below])  # (the footnotes: the signature line under them)
+    def set_limits() -> None:
+        for b in regions:
+            # (beside it, a few pt into its span, is not below it: a margin note set against a column)
+            below = [o.y for o in blocks if o is not b and o.y > b.y + 0.5 * b.line_h
+                     and min(b.x + b.w, o.x + o.w) - max(b.x, o.x) > 0.3 * max(b.size, 1.0)
+                     and not (o.item is not None and o.item.kind == "dropcap")  # a capital stands beside
+                     and not (margin_note(b) and margin_note(o))]
+            b.limit = min([height_pt, *below])  # (the footnotes: the signature line under them)
+
+    set_limits()
 
     # size every paragraph to the room it has: as many lines (at the original pitch) as fit down
     # to the next block, at least as many as the scan had
@@ -2400,18 +2557,30 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
         rows = max(1, wrap_lines(plain(b.item.text), b.w, b.size, _times(b.item.italic)))
         y0, y1 = b.y, b.y + rows * max(b.line_h, b.size)
         gap, least = 0.5 * b.size, 3 * b.size
+        def beside(p: Block) -> bool:
+            p1 = p.y + max(p.fit[0] if p.fit else 1, 1) * max(p.line_h, p.size)
+            return min(y1, p1) - max(y0, p.y) >= 0.3 * b.size
+
         for o in paras:
-            o1 = o.y + max(o.fit[0] if o.fit else 1, 1) * max(o.line_h, o.size)
-            if min(y1, o1) - max(y0, o.y) < 0.3 * b.size or min(b.x + b.w, o.x + o.w) - max(b.x, o.x) <= -gap:
+            if not beside(o) or min(b.x + b.w, o.x + o.w) - max(b.x, o.x) <= -gap:
                 continue
+            # (as wide as it was, out toward the page's edge where no text stands: a margin 101 pt wide
+            # by the notes' own edges, 72 pt off the paragraph, was left over the text's line ends,
+            # p. 403, 603, 710, 990)
             if b.x + b.w / 2 > o.x + o.w:  # (a note right of the text)
                 edge = o.x + o.w + gap
-                if b.x < edge and b.x + b.w - edge >= least:
-                    b.w, b.x = b.x + b.w - edge, edge
+                if b.x < edge:
+                    right = max(b.x + b.w, min([width_pt - gap, edge + b.w] + [p.x - gap for p in paras
+                                                if p is not o and p.x > b.x and beside(p)]))
+                    if right - edge >= least:
+                        b.x, b.w = edge, right - edge
             elif b.x + b.w / 2 < o.x:  # (left of it)
                 edge = o.x - gap
-                if b.x + b.w > edge and edge - b.x >= least:
-                    b.w = edge - b.x
+                if b.x + b.w > edge:
+                    left = min(b.x, max([gap, edge - b.w] + [p.x + p.w + gap for p in paras
+                                         if p is not o and p.x + p.w < b.x + b.w and beside(p)]))
+                    if edge - left >= least:
+                        b.x, b.w = left, edge - left
     # a margin note with a word wider than its margin (a Greek or Hebrew word, "Dameschack."): out
     # to the page's edge first (half an em off it), in an outer margin, and only as much smaller as
     # that still leaves (eight ran 5-30 pt off the page, vol. 1)
@@ -2433,6 +2602,9 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
             b.size *= max(MIN_FIT, b.w / longest)
             _follow_size(b)
             b.start_size = b.size
+    # and again, with the blocks where they now stand: a note moved out of a paragraph's text above
+    # is no block below it (its limit stayed the note's top, one line under its own: p. 603, 799, 1013)
+    set_limits()
     return blocks
 
 
