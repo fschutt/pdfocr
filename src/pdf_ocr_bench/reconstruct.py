@@ -2330,7 +2330,29 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
                         after = [g for g in wide_gaps if g[1] * px >= 0.5 * share]
                         if after:
                             w = min(after, key=lambda g: g[1])[1] * px
+            # the heading line set above it (on its page, in its column's span)
+            above = [b for b in blocks if b.item is not None and b.item.kind == "heading" and b.nowrap and b.y < top
+                     and min(b.x + b.w, x0 + w) > max(b.x, x0)]
+            near = max(above, key=lambda b: b.y).size if above else None
+            if near and all(l.id.startswith("X") for l in group):
+                # no OCR line of its own: the size of the heading line above it, not of the box made for it
+                # under that one ("Curiosities of the JEWS." at 18.7 pt among lines of 40-53, p. 2)
+                size0 = near
+            fits = w / max(face.text_length(label, 1.0), 0.1)  # (the size that sets it in one row)
+            if fits < 0.6 * (near or size0):
+                # a text of several printed rows the model gave as one heading line (Vision read one of its
+                # three rows, garbled): wrapped at its box's width, at the size of the heading line above it,
+                # not squeezed into one row ("the Hebrew Coins, Weights, and Measures, ..." at 11 pt, p. 2)
+                size = min(size0, near) if near else size0
+                blocks.append(Block(item, x0, top, max(w, 1.0) * 1.02, size, 1.2 * size,
+                                    item.align if item.align in ("center", "right") else "left"))
+                continue
             size = min(1.1 * size0, w / max(face.text_length(label, 1.0), 0.1))
+            if near and all(l.id.startswith("X") for l in group):
+                # (as the line above it, centred in the box made for it: no box of its own says more)
+                size = min(near, fits)
+                natural = face.text_length(label, size)
+                x0, w = x0 + max(0.0, (w - natural) / 2), min(w, natural)
             spacing = 0.0
             if first.spacing > SPACED and first.glyph and len(label) > 2:
                 # letter-spaced (D I C T I O N A R Y): the size of its glyphs, the rest of the
@@ -2772,8 +2794,21 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
     for run in runs_:
         if len(run) < 3 or max(b.y for b in run) - min(b.y for b in run) < 0.5 * run[0].size:
             continue  # (one row: a running head, a signature line)
+        # (lines whose glyphs the scan measures alike: a title page's lines differ by design, 28-167 pt, p. 2)
+        glyphs = {id(b): sorted(by_id[i].glyph for i in b.item.lines if i in by_id and by_id[i].glyph) for b in run}
+        g = sorted(v[len(v) // 2] for v in glyphs.values() if v)
+        if g:
+            mid = g[len(g) // 2]
+            run = [b for b in run if not glyphs[id(b)] or 0.75 * mid <= glyphs[id(b)][len(glyphs[id(b)]) // 2] <= 1.33 * mid]
+        if len(run) < 3:
+            continue
         sizes = sorted(b.size for b in run)
         common = sizes[len(sizes) // 2]
+        # (a list's names, four words at most, or lines already within 15% of one another: a title's lines,
+        # 34-53 pt as printed, are no list, p. 2; a title of four lines at 49-56 pt is, p. 1047)
+        run = [b for b in run if len(plain(b.item.text).split()) <= 4 or 0.85 * common <= b.size <= 1.15 * common]
+        if len(run) < 3:
+            continue
         for b in run:
             if not 0.7 * common <= b.size <= 1.45 * common:
                 continue  # (a title over its list keeps its own)
@@ -3185,7 +3220,9 @@ def fit_round(target: Path, page_blocks: dict[int, list[Block]], pages_meta: lis
                     shrunk[p["page_num"]] = shrunk.get(p["page_num"], 0) + len(margin)
                     continue
                 end = min(block.limit, report["height_pt"])
-                wide = rendered["x1"] > block.x + block.w + 0.25 * block.size
+                # (a word wider than its margin; not a line one letter too long, azul #6: left to show)
+                wide = rendered["x1"] > block.x + block.w + 0.25 * block.size and max(
+                    (_times(block.item.italic).text_length(w_, block.size) for w_ in plain(block.item.text).split()), default=0.0) > block.w
                 if not above and (wide or rendered["y1"] > end - 0.1 * block.line_h) and end - block.y - 0.3 * block.line_h > block.line_h:
                     # and one so moved that runs past the page's end (or the footnotes), or one with a
                     # word wider than its margin ("Mechilta." into the paragraph beside it, p. 106),
@@ -3211,8 +3248,11 @@ def fit_round(target: Path, page_blocks: dict[int, list[Block]], pages_meta: lis
                 took = max(rendered["y1"] - block.y, 1.0)
                 room = max(block.limit - block.y, 0.5 * block.line_h)
                 ratio = room / took
-            if rendered["x1"] > block.x + block.w + 0.25 * block.size:
-                # a line wider than its box: a heading, or a word longer than a note's line
+            longest = max((_times(block.item.italic).text_length(w_, block.size) for w_ in plain(block.item.text).split()), default=0.0)
+            if rendered["x1"] > block.x + block.w + 0.25 * block.size and (block.nowrap or longest > block.w):
+                # a line wider than its box: a heading, or a word longer than a note's line. (Not a wrapped
+                # block's line running past its box otherwise: that is the engine's fault, azul #6, a line
+                # one letter too long after a ligature, and is left to show, not set smaller)
                 ratio = min(ratio, block.w / max(rendered["x1"] - block.x, 1.0))
             if "foot" in block.item.label.lower() and rendered["y1"] - rendered["y0"] < 1.6 * block.line_h:
                 # a footnote of one line runs into the next one on its row

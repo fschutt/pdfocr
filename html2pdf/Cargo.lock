@@ -152,7 +152,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 [[package]]
 name = "azul-core"
 version = "0.0.16"
-source = "git+https://github.com/fschutt/azul?branch=fix%2Finput-bugs-2026-09-19#8b9620a2204ce77767af5cb398b4a124a34fa56a"
+source = "git+https://github.com/fschutt/azul?branch=fix%2Finput-bugs-2026-09-19#0f84e0652e4ae7425ce58b1f31322a4879b0bc45"
 dependencies = [
  "azul-css",
  "gl-context-loader",
@@ -163,7 +163,7 @@ dependencies = [
 [[package]]
 name = "azul-css"
 version = "0.0.16"
-source = "git+https://github.com/fschutt/azul?branch=fix%2Finput-bugs-2026-09-19#8b9620a2204ce77767af5cb398b4a124a34fa56a"
+source = "git+https://github.com/fschutt/azul?branch=fix%2Finput-bugs-2026-09-19#0f84e0652e4ae7425ce58b1f31322a4879b0bc45"
 dependencies = [
  "azul-simplecss",
  "libm",
@@ -172,7 +172,7 @@ dependencies = [
 [[package]]
 name = "azul-layout"
 version = "0.0.16"
-source = "git+https://github.com/fschutt/azul?branch=fix%2Finput-bugs-2026-09-19#8b9620a2204ce77767af5cb398b4a124a34fa56a"
+source = "git+https://github.com/fschutt/azul?branch=fix%2Finput-bugs-2026-09-19#0f84e0652e4ae7425ce58b1f31322a4879b0bc45"
 dependencies = [
  "accesskit",
  "allsorts-azul",
