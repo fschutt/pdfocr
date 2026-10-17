@@ -2611,6 +2611,26 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
     if ("text", False) in area_size and ("notes", False) in area_size:
         text_size = area_size[("text", False)]
         area_size[("notes", False)] = min(max(area_size[("notes", False)], 0.65 * text_size), 0.88 * text_size)
+    # and no larger than the notes' printed lines are wide: measured on their capitals and figures they
+    # came out 20% larger than their lines take, capped at 0.88 of the text, and a margin of chronology
+    # notes ran twelve rows each, over one another to the page's foot (p. 496, 584)
+    if ("text", False) in area_size and ("notes", False) in area_size:
+        by_width = []
+        for b in text_blocks:
+            if area_of[id(b)] != ("notes", False):
+                continue
+            face = _times(b.item.italic)
+            for i in b.item.lines:
+                l = by_id.get(i)
+                if l is None or i.startswith("X") or len(l.text) < 6 or l.box.w * px > 1.2 * b.w:
+                    continue  # (not a line Vision ran into the text beside it)
+                natural = face.text_length(l.text, 1.0)
+                if natural > 0:
+                    by_width.append(l.box.w * px / natural)
+        if len(by_width) >= 5:
+            fits = sorted(by_width)[len(by_width) // 2]
+            if fits < area_size[("notes", False)]:
+                area_size[("notes", False)] = max(fits, 0.65 * area_size[("text", False)])
     # (the footnotes too: 0.6-0.95 of the text, the book's median 0.84; measured on figures and
     # capitals they came out at 51 pt for text of 39, p. 65)
     if ("text", False) in area_size and ("footnotes", False) in area_size:
