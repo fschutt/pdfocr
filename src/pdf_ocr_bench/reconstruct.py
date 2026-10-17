@@ -1258,7 +1258,15 @@ def place_lineless(items: list[Item], lines: list[Line], layout: PageLayout, ink
     note_pitch = note_steps[len(note_steps) // 2] if len(note_steps) >= 2 else 1.6 * lh
     for k, item in enumerate(items):
         own = [l for l in lines + made if l.id in item.lines]
-        if own and item.kind == "note" and not any(c.isalnum() for l in own for c in l.text):
+        read_ = {_norm_word(w) for l in own for w in l.text.split()} - {""}
+        if own and item.kind == "note" and (not any(c.isalnum() for l in own for c in l.text) or (
+                # (or a few characters that read none of its words: '-oS"' mid-column for "d Ezra v. 1, 2,
+                # &c.", which Vision ran into the text's line ends, p. 758)
+                # or lines as wide as a column's text, reading none of them either: Vision's misreadings
+                # of faint print in the column, "all and wanted meed commor" for "Matth. xxiv. 1, 2, 3",
+                # set 677 pt wide over the paragraph, p. 913)
+                (sum(len(l.text.strip()) for l in own) < 8 or min(l.box.w for l in own) > 12 * lh)
+                and not read_ & {_norm_word(w) for w in plain(item.text).split()})):
             # a note whose lines read nothing (a speck "•" in the gutter for "Judith vii. 3. in Syriaco.",
             # which Vision ran into the text's lines in the other margin, p. 375): placed by its words
             own = []
@@ -1283,6 +1291,17 @@ def place_lineless(items: list[Item], lines: list[Line], layout: PageLayout, ink
             bottom = max(l.box.y1 for l in lines)
             cw = (Box(int(right - 0.45 * h * len(plain(item.text))), int(bottom + 0.2 * lh), int(right), int(bottom + 0.2 * lh + h)), [])
         hit = cw or locate(item.text, loose, lh)
+        if hit and not cw and item.kind == "note":
+            # (not inside the text: where the lines about it that hold none of its words start and end;
+            # "Rom. xv. 19." found in "S. Ferom a fays" was set mid-column over the text, p. 934)
+            hb, found = hit[0], {id(b) for _, b in hit[1]}
+            near = [l for l in lines if abs(l.box.y0 - hb.y0) < 6 * lh and len(l.text) >= 25
+                    and not any(id(b) in found for _, b in l.words)]
+            if len(near) >= 3:
+                starts = sorted(l.box.x0 for l in near)
+                ends = sorted(l.box.x1 for l in near)
+                if hb.x0 > starts[len(starts) // 2] + lh and hb.x1 < ends[len(ends) // 2] - lh:
+                    hit = None
         if not hit and item.kind == "note":
             # its words among those the texts account for (the paragraph's own "Book of Judith" took
             # the margin's "Judith" of the line Vision ran the note into, p. 375): where all the
@@ -1469,7 +1488,15 @@ def row_extent(group: list[Line], lh: float, ragged: bool = False) -> tuple[floa
     # (where most end: justified lines end at the column's edge; a line Vision ran across the gutter
     # into the next column must not carry the measure there, p. 914 and p. 947)
     x0s, x1s = sorted(r[0] for r in rows), sorted(r[1] for r in rows)
-    return x0s[round(0.2 * (len(x0s) - 1))], x1s[(len(x1s) - 1) // 2 if len(x1s) >= 3 and not ragged else -1], len(rows)
+    end = x1s[(len(x1s) - 1) // 2 if len(x1s) >= 3 and not ragged else -1]
+    if ragged and len(rows) >= 4:
+        # (the longest, but not one row Vision ran into the cell beside it: "Herod King of Agrippa I.
+        # King", twice as wide as the genealogy's other rows, set its cell 400 pt wide over the next, p. 799)
+        widths = sorted(r[1] - r[0] for r in rows)
+        longest = max(rows, key=lambda r: r[1])
+        if longest[1] - longest[0] > 1.5 * widths[len(widths) // 2] and sum(1 for r in rows if r[1] > x1s[-2] + lh) == 1:
+            end = x1s[-2]
+    return x0s[round(0.2 * (len(x0s) - 1))], end, len(rows)
 
 
 def text_edges(ink, e0: float, e1: float, y0: float, y1: float, lh: float, rows: int,
@@ -1722,7 +1749,7 @@ def page_zones(layout: PageLayout) -> list[Zone]:
     return out
 
 
-def set_footnotes(blocks: list[Block], by_id: dict, lh: float, px: float) -> None:
+def set_footnotes(blocks: list[Block], by_id: dict, lh: float, px: float, text_edges_: tuple[float, float] | None = None) -> None:
     """The footnotes as one run-in block across the footnote band, in reading order, a wide space
     between them, at the scan's row pitch: print sets them one after another in rows. (Placed
     one by one from the OCR they ran into each other: lines the OCR merged across the band,
@@ -1747,15 +1774,10 @@ def set_footnotes(blocks: list[Block], by_id: dict, lh: float, px: float) -> Non
     lines = band
     # (its edges where its rows start and end, not a margin piece among them: "Æra 1285. xxvii." set
     # the block's left 140 pt into the margin, under a chronology note, p. 778)
-    grouped: list[list[Line]] = []
-    for l in sorted(lines, key=lambda l: l.box.y0):
-        if grouped and l.box.y0 - grouped[-1][0].box.y0 <= 0.5 * lh:
-            grouped[-1].append(l)
-        else:
-            grouped.append([l])
-    starts = sorted(min(l.box.x0 for l in r) for r in grouped)
-    ends = sorted(max(l.box.x1 for l in r) for r in grouped)
-    s0, s1 = starts[len(starts) // 2], ends[len(ends) // 2]
+    # (the text's edges, not the median of the band's rows: two or three rows, one a piece mid-row, set
+    # the block 750 pt narrow, p. 484, 938)
+    s0 = text_edges_[0] if text_edges_ else min(l.box.x0 for l in lines)
+    s1 = text_edges_[1] if text_edges_ else max(l.box.x1 for l in lines)
     x0 = min((l.box.x0 for l in lines if l.box.x0 >= s0 - 2 * lh), default=min(l.box.x0 for l in lines))
     x1 = max((l.box.x1 for l in lines if l.box.x1 <= s1 + 2 * lh), default=max(l.box.x1 for l in lines))
     top = min(l.box.y0 for l in lines)
@@ -2520,7 +2542,7 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
         block.fit = (n, size0, pitch)  # sized below, once the room down to the next block is known
         blocks.append(block)
 
-    set_footnotes(blocks, by_id, layout.line_height, px)
+    set_footnotes(blocks, by_id, layout.line_height, px, (text_left, text_right))
 
     # how far down each text block may reach: the top of the next block below it that it would
     # run into (same horizontal span; footnotes and pictures are blocks too), else the page's end.
@@ -3246,8 +3268,7 @@ def fit_round(target: Path, page_blocks: dict[int, list[Block]], pages_meta: lis
                     size = min(0.98 * b.size, own)
                     # (10% for a paragraph of ten printed lines and more: its room is what they
                     # took, and the estimate breaks no word where azul hyphenates, p. 1046)
-                    # (8% for one of four printed rows or fewer: its three rows took a fourth at 6.5% smaller, p. 675)
-                    least = 0.9 if b.fit and b.fit[0] >= 10 else (0.92 if b.fit and b.fit[0] <= 4 else 0.94)
+                    least = 0.9 if b.fit and b.fit[0] >= 10 else 0.94
                     if room_lines >= 1 and size >= least * level:
                         b.size = size
                         _follow_size(b)

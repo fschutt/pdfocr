@@ -136,12 +136,49 @@ def to_items(answer: dict, lines: list, layout: PageLayout):
     _join_split(items, known)  # (before the trim: a trimmed paragraph ends mid-sentence)
     _trim_repeated(items, known)
     _drop_doubled_notes(items)
+    _drop_echo_headings(items, known)
     # lines the answer left out: fine when they are a little junk, not when text went missing
     missing = sum(len(l.text) for i, l in known.items() if i not in used)
     total = sum(len(l.text) for l in lines) or 1
     if missing > 0.15 * total:
         return None
     return items
+
+
+def _drop_echo_headings(items: list, known: dict) -> None:
+    """A one-line heading that reads a piece of its line, the rest of which is the words of the
+    paragraph around it: that paragraph's line ("testants." of "Pro-|testants published,", set at 64
+    pt over the paragraph, p. 341). The heading goes, its line to the paragraph."""
+    from .reconstruct import _norm_word, plain
+
+    for it in list(items):
+        if it.kind != "heading" or len(it.lines) != 1 or it.lines[0] not in known:
+            continue
+        line = known[it.lines[0]]
+        words = [k for k in (_norm_word(w) for w in line.text.split()) if len(k) >= 3]
+        head = [k for k in (_norm_word(plain(w)) for w in it.text.split()) if k]
+        if len(words) < 2 or len(head) >= 0.6 * len(words):
+            continue
+        for p in items:
+            if p.kind != "paragraph":
+                continue
+            mine = [known[i] for i in p.lines if i in known]
+            if not any(abs(l.box.y0 - line.box.y0) < 2.5 * max(l.box.h, 1)
+                       and min(l.box.x1, line.box.x1) > max(l.box.x0, line.box.x0) for l in mine):
+                continue
+            keys = {k for k in (_norm_word(plain(w)) for w in p.text.split()) if k}
+
+            def has(k: str) -> bool:
+                return k in keys or (len(k) >= 4 and any(o.endswith(k) for o in keys))
+            # (and the paragraph has the heading's words too: no headword read apart from its line lost)
+            if sum(1 for k in words if has(k)) >= 0.75 * len(words) and all(has(k) for k in head):
+                items.remove(it)
+                # (among its lines by where it stands: after the last one above it in its column)
+                above = [n for n, l in enumerate(mine) if l.box.y0 < line.box.y0
+                         and min(l.box.x1, line.box.x1) > max(l.box.x0, line.box.x0)]
+                at = p.lines.index(mine[max(above)].id) + 1 if above else 0
+                p.lines = p.lines[:at] + [line.id] + p.lines[at:]
+                break
 
 
 def _drop_doubled_notes(items: list) -> None:
@@ -227,7 +264,7 @@ def _join_split(items: list, known: dict) -> None:
     Goliath's Sword ..." another, with the headword's line; both were set at that row (p. 35,
     p. 792). Or Vision read the row twice ("phetess Huldah. Many have been of" | "opinion, that
     the Lamentations", p. 1003)."""
-    from .reconstruct import plain
+    from .reconstruct import FOOT_MARK, LETTER_MARK, _norm_word, plain
 
     k = 0
     while k + 1 < len(items):
@@ -235,6 +272,40 @@ def _join_split(items: list, known: dict) -> None:
         la = [known[i] for i in a.lines if i in known]
         lb = [known[i] for i in b.lines if i in known]
         end = plain(a.text).rstrip().rstrip("\"'\u201d\u2019)")
+        last = max(la, key=lambda l: l.box.y0) if la else None
+
+        def runs_on(c) -> bool:
+            # (a later paragraph begins on its last row, after where that row ends: a quotation run on,
+            # "over the Greeks. “The first day they light up one lamp", set as a block of its own on that
+            # row, p. 674; the model may list the other column's paragraphs between)
+            first = known.get(c.lines[0]) if c.lines else None
+            # (not footnotes, which follow one another on their rows: those are set as one block anyway)
+            if any(FOOT_MARK.match(t) or LETTER_MARK.match(t) for t in (a.text, c.text)):
+                return False
+            if not (last and first) or first is last:
+                return False
+            # (its first listed line reads its first words: the model may list a later line first, and
+            # "DRUSILLA." was joined to the paragraph whose row that line stands on, p. 572)
+            head = [k for k in (_norm_word(plain(w)) for w in c.text.split()[:3]) if k]
+            if not head or head[0] not in [_norm_word(w) for w in first.text.split()[:3]]:
+                return False
+            h = max(min(last.box.h, first.box.h), 1)  # (the smaller: a box Vision drew tall says little, p. 953)
+            # (in the column its last row is in: the rows above that row, starting where it does, reach on
+            # past where the other begins; not a paragraph of the other column on the same row, p. 75)
+            widths = sorted(l.box.w for l in la)
+            above = [l for l in la if last.box.y0 - 4 * h <= l.box.y0 < last.box.y0 - 0.5 * h
+                     and abs(l.box.x0 - last.box.x0) < 3 * h and l.box.w < 1.3 * widths[len(widths) // 2]]  # (not one over the gutter, p. 145)
+            return bool(a.kind == c.kind == "paragraph" and "foot" not in (a.label + c.label).lower()
+                        and abs(first.box.y0 - last.box.y0) < 0.5 * h and abs(first.box.y1 - last.box.y1) < 0.5 * h
+                        and first.box.x0 > last.box.x1 - 0.5 * h
+                        and above and max(l.box.x1 for l in above) > first.box.x0 + 4 * h)
+        nxt = next((j for j in range(k + 1, len(items)) if runs_on(items[j])), None)
+        run_on = nxt is not None
+        c = items[nxt] if run_on else b
+        if run_on:
+            items[k] = replace(a, text=a.text.rstrip() + " " + c.text.lstrip(), lines=a.lines + [i for i in c.lines if i not in a.lines])
+            del items[nxt]
+            continue
         if (a.kind == b.kind == "paragraph" and "foot" not in (a.label + b.label).lower() and la and lb
                 and len(la) <= 2 and end and end[-1] not in ".!?:;"
                 and any(abs(x.box.y0 - y.box.y0) < 0.5 * max(x.box.h, 1) and x.zone == y.zone for x in la for y in lb)):
