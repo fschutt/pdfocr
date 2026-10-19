@@ -1272,8 +1272,11 @@ def place_lineless(items: list[Item], lines: list[Line], layout: PageLayout, ink
     for k, item in enumerate(items):
         own = [l for l in lines + made if l.id in item.lines]
         read_ = {_norm_word(w) for l in own for w in l.text.split()} - {""}
-        # (not a footnote's: its mark says where it is, p. 381)
-        if own and item.kind == "note" and not (FOOT_MARK.match(item.text) or LETTER_MARK.match(item.text)) and (
+        # (not a footnote's: its mark, or a letter mark in the page's foot, says where it is, p. 381; a
+        # margin note's reference letter, "d Ezra v. 1", is none, p. 758)
+        footnote_ = FOOT_MARK.match(item.text) or (LETTER_MARK.match(item.text) and own
+                                                    and min(l.box.y0 for l in own) > 0.8 * layout.height)
+        if own and item.kind == "note" and not footnote_ and (
                 not any(c.isalnum() for l in own for c in l.text) or (
                 # (or a few characters that read none of its words: '-oS"' mid-column for "d Ezra v. 1, 2,
                 # &c.", which Vision ran into the text's line ends, p. 758)
@@ -2341,7 +2344,7 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
                 hs_ = sorted(bt - t for t, bt in zip(rows, bottoms))
                 h0 = hs_[n // 2] if n >= 5 else min(hs_[(n - 1) // 2], page_line_h)  # (a row's usual height)
                 est = []
-                for t, bt in zip(rows, bottoms):
+                for t, bt in list(zip(rows, bottoms))[:5]:  # (its first rows: over twenty, a pitch 0.3 pt off drifts 6 pt)
                     k = round((t - rows[0]) / step)
                     est += [t - k * step, bt - h0 - k * step]
                 est.sort()
@@ -2649,7 +2652,15 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
             # (its first words there, not a margin note Vision ran into the row)
             head_ = [k for k in (_norm_word(plain(w_)) for w_ in item.text.split()[:2]) if k]
             reads_head = bool(head_) and head_[0] in [_norm_word(w_) for w_ in lead_piece.text.split()[:3]]
-            if later and reads_head and x0 - 6 * size0 <= fx < x0 - 0.5 * size0 and abs(later[len(later) // 2] - x0) < 0.5 * size0:
+            # (and no note in the room the outdent takes, beside its first rows: those rows start further in
+            # because a margin note stands in the column there, and a first line drawn out over it ran into
+            # the note, p. 632, 658, 661)
+            step_ = steps[len(steps) // 2] if steps else layout.line_height
+            noted = any(min(nt[2], x0 / px) - max(nt[0], fx / px) > 0 and nt[1] < rows[0] + 2.5 * step_ and nt[3] > rows[0] - 0.5 * step_
+                        for nt in inner_notes + keep_clear)
+            # (a table's entry, of a few rows, outdented by more than Vision's loose box starts, 15-25 pt)
+            if later and reads_head and not noted and n <= 6 and x0 - 6 * size0 <= fx < x0 - 0.8 * size0 \
+                    and abs(later[len(later) // 2] - x0) < 0.5 * size0:
                 indent = fx - x0
         align = item.align if item.kind == "paragraph" else "left"
         if item.kind == "heading":
