@@ -2329,11 +2329,10 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
         # 410, 738)
         bottoms = [sorted(l.box.y1 for l in r)[len(r) // 2] for r in row_lines]
         steps = sorted(b - a for a, b in zip(rows, rows[1:]))
-        both = sorted(steps + [b - a for a, b in zip(bottoms, bottoms[1:])])
+        # (one-row steps of the tops: bottoms move with descenders, and pooled with them a five-row
+        # paragraph's pitch came out 43.5 for print's 41.3, p. 67)
         if page_step:
-            both = [s_ for s_ in both if 0.7 * page_step <= s_ <= 1.4 * page_step] or both
-        if len(both) >= 3:
-            steps = both
+            steps = [s_ for s_ in steps if 0.7 * page_step <= s_ <= 1.4 * page_step] or steps
         pitch = steps[len(steps) // 2] * px if steps else 1.2 * size0
         if item.kind == "paragraph" and part_no == 0 and n >= 2 and abs(first.box.y0 - rows[0]) < 0.5 * layout.line_height:
             # its top where its rows stand on their grid, all of them, by tops and bottoms: not its first OCR
@@ -2353,6 +2352,12 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
                 # top set high; and a few px is the box's own slack)
                 if 0.12 * step < abs(expect - first.box.y0) < 0.9 * step:
                     top = expect * px
+                    # (and its rows' steps from there: from the tall box's top they made a pitch of 44 for 42, p. 241)
+                    rows = [expect] + rows[1:]
+                    steps = sorted(b_ - a_ for a_, b_ in zip(rows, rows[1:]))
+                    if page_step:
+                        steps = [s_ for s_ in steps if 0.7 * page_step <= s_ <= 1.4 * page_step] or steps
+                    pitch = steps[len(steps) // 2] * px if steps else pitch
         steps_pt = tuple(s * px for s in steps)
         if item.kind == "heading" and (len(group) == 1 or n == 1):
             # one line as printed (in one piece or several Vision read apart: "(10" and ")" of the
@@ -2706,11 +2711,14 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
             a_end, b_end = a.y + rows_a * max(a.line_h, a.size), b.y + rows_b * max(b.line_h, b.size)
             if not (over > -2 * lh_pt and min(a_end, b_end) - max(a.y, b.y) > a.line_h and over < 0.3 * min(a.w, b.w)):
                 continue
-            white = gutter(min(a.x + a.w, b.x) - 2 * lh_pt, max(a.x + a.w, b.x) + 2 * lh_pt, max(a.y, b.y), min(a_end, b_end))
+            # (white over both blocks' rows, not only those they share: a short last row there left white far into
+            # its column, and the box lost 47 pt, p. 216; and no more than 6% off either: the print's gutter is
+            # what Vision's ends and starts missed, 4-27 pt)
+            white = gutter(min(a.x + a.w, b.x) - 2 * lh_pt, max(a.x + a.w, b.x) + 2 * lh_pt, min(a.y, b.y), max(a_end, b_end))
             if white:
-                a.w = min(a.w, white[0] - a.x)
+                a.w = min(a.w, max(white[0] - a.x, 0.94 * a.w))
                 right = b.x + b.w
-                b.x = max(b.x, white[1])
+                b.x = min(max(b.x, white[1]), b.x + 0.06 * b.w)
                 b.w = right - b.x
             elif over > 0:
                 mid = (a.x + a.w + b.x) / 2
@@ -2893,8 +2901,6 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
         # p. 30), or over as many of the area's as that is (a row Vision did not read)
         span = sum(b.steps)
         own = span / max(len(b.steps), round(span / area_pitch)) if b.steps else b.pitch
-        if len(b.steps) >= 4:
-            own = sorted(b.steps)[len(b.steps) // 2]  # (the usual step: one off row moves a mean, p. 241, 410)
         if id(b) in own_size:
             # a size of its own (or a measure of its glyphs off by its capitals): its own rows
             b.pitch = own if b.steps else area_pitch * b.size / area_size.get(area_of[id(b)], b.size)
