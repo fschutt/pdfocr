@@ -1825,6 +1825,24 @@ def set_footnotes(blocks: list[Block], by_id: dict, lh: float, px: float, text_e
         blocks.remove(b)
 
 
+def _caps_height(ink, box: Box) -> float:
+    """The height of a line's capitals in the scan (px): the median of its tall ink components, those of at
+    least half the tallest; 0 if there are none. (Vision's box heights vary: 51 px round capitals 32 tall, p. 217)"""
+    if ink is None:
+        return 0.0
+    import cv2
+
+    crop = ink[max(0, box.y0):box.y1, max(0, box.x0):box.x1]
+    if crop.size == 0:
+        return 0.0
+    _, _, stats, _ = cv2.connectedComponentsWithStats(crop.astype("uint8"), connectivity=8)
+    hs = sorted(int(h) for _, _, w, h, a in stats[1:] if a >= 8)
+    if not hs:
+        return 0.0
+    tall = [h for h in hs if h >= 0.5 * hs[-1]]
+    return float(tall[len(tall) // 2])
+
+
 def _follow_size(b: Block) -> None:
     """A wrapped block's line height: the scan's line pitch, when it was printed on two lines or
     more; else its size. The dictionary is set solid, its notes too (rows 27-32 pt apart for
@@ -2350,7 +2368,9 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
                 expect = est[len(est) // 2]
                 # (by less than a row: a box over rows Vision did not read, "FLE" for four, p. 980, is no
                 # top set high; and a few px is the box's own slack)
-                if 0.12 * step < abs(expect - first.box.y0) < 0.9 * step:
+                # (down only: a tall box sets a top too high, never too low; moved up, entries ran into the one
+                # above them, p. 50, 463, 934)
+                if 0.12 * step < expect - first.box.y0 < 0.9 * step:
                     top = expect * px
                     # (and its rows' steps from there: from the tall box's top they made a pitch of 44 for 42, p. 241)
                     rows = [expect] + rows[1:]
@@ -2413,10 +2433,13 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
             elif letters_ and all(c.isupper() for c in letters_) and not first.spacing > SPACED and not lineless:
                 # capitals only ("VOL. I."): its box is the capitals' height, some 0.78 em, not the 1.05 em a line
                 # with ascenders and descenders takes (set at 23 pt for 33, p. 46, 672)
-                size0 = max(size0, first.glyph * px / TYPEFACE.get("cap", TIMES_CAP) if first.glyph else first.box.h * px / 0.78)
+                caps_h = first.glyph or _caps_height(ink, first.box)
+                if caps_h:
+                    size0 = max(size0, caps_h * px / TYPEFACE.get("cap", TIMES_CAP))
             fits = w / max(face.text_length(label, 1.0), 0.1)  # (the size that sets it in one row)
             partial = len(re.sub(r"\W", "", read)) < 0.85 * len(re.sub(r"\W", "", mine))  # (Vision read a piece: "OL.I.")
-            if (fits < 0.6 * (near or size0) or (partial and fits < 0.9 * size0)) and len(label.split()) <= 3 \
+            # (a misread character, "•" for "I.", is no piece missing: the box is whole, p. 217)
+            if (fits < 0.6 * size0 or (partial and fits < 0.75 * size0)) and len(label.split()) <= 3 \
                     and not all(l.id.startswith("X") for l in group):
                 # a short line whose OCR box is too narrow for it (a piece of it read, or misread): the size
                 # of its glyphs' box, no larger than the page's text, out past its box ("P. 514." at 11 pt,
@@ -2656,7 +2679,9 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
             fx = lead_piece.box.x0 * px
             # (its first words there, not a margin note Vision ran into the row)
             head_ = [k for k in (_norm_word(plain(w_)) for w_ in item.text.split()[:2]) if k]
-            reads_head = bool(head_) and head_[0] in [_norm_word(w_) for w_ in lead_piece.text.split()[:3]]
+            # (its very first word: "od. The Levites upon", the end of the paragraph before Vision ran into the
+            # row, made one, its first line drawn out over the note beside it, p. 760)
+            reads_head = bool(head_) and [_norm_word(w_) for w_ in lead_piece.text.split()[:1]] == head_[:1]
             # (and no note in the room the outdent takes, beside its first rows: those rows start further in
             # because a margin note stands in the column there, and a first line drawn out over it ran into
             # the note, p. 632, 658, 661)
@@ -3466,7 +3491,9 @@ def fit_round(target: Path, page_blocks: dict[int, list[Block]], pages_meta: lis
                     room_lines = int((b.limit - b.y) / max(b.line_h, 1.0) + 0.15)
                     if b.fit and room_lines < b.fit[0] and b.limit - b.y >= (b.fit[0] - 0.35) * b.line_h:
                         room_lines = b.fit[0]  # (11.76 rows of room for 12 printed is room for 12, p. 358)
-                    own = fit_size(plain(b.item.text), 0.97 * b.w, max(room_lines, 1), b.size, _times(b.item.italic), b.indent)
+                    # (at 99% of its width: the shaper measures as azul sets; at 97% the size it asked was 3% too small,
+                    # past the 6% allowed, for entries a gutter's few pt made a row too long, p. 382, 765, 900)
+                    own = fit_size(plain(b.item.text), 0.99 * b.w, max(room_lines, 1), b.size, _times(b.item.italic), b.indent)
                     size = min(0.98 * b.size, own)
                     # (10% for a paragraph of ten printed lines and more: its room is what they
                     # took, and the estimate breaks no word where azul hyphenates, p. 1046)
