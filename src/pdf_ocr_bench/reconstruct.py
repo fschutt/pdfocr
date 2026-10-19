@@ -1959,7 +1959,8 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
             # 1.2 of the text's, footnotes of several lines 0.73-0.88 (vol. 1)
             glyphs = sorted(l.glyph for l in g if l.glyph)
             return (len(glyphs) >= 2 and glyphs[len(glyphs) // 2] >= 0.95 * body_glyph
-                    and _ratio_of(it.text) != HEBREW_LETTER  # (Hebrew stands taller, no text type, p. 318)
+                    # (Hebrew stands taller, no text type, nor Hebrew beside its reading, "גיא הנום Geh-hennon.", p. 318)
+                    and sum("\u0590" <= c <= "\u05ff" for c in it.text) < 0.3 * max(1, sum(c.isalpha() for c in plain(it.text)))
                     and not FOOT_MARK.match(it.text) and not LETTER_MARK.match(it.text))
 
         # (and the footnotes are below all of it: not a margin note beside it, nor a line of text
@@ -2363,8 +2364,11 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
                 est = []
                 # (rows counted from the second: a first box over two rows, "ACCHO" 84 pt tall for rows 42 apart,
                 # took the grid's phase with it, and all rows agreed on a top a row high, p. 50, 934)
+                # (from the second only when the first box is that tall: a row Vision merged away after a normal
+                # first row set the count a row off, and the top a row low, p. 862, 900, 1052)
+                two_rows = n >= 2 and first.box.h > 1.6 * h0
                 for t, bt in list(zip(rows, bottoms))[:5]:  # (its first rows: over twenty, a pitch 0.3 pt off drifts 6 pt)
-                    k = round((t - rows[1]) / step) + 1 if n >= 2 else 0
+                    k = round((t - rows[1]) / step) + 1 if two_rows else round((t - rows[0]) / step)
                     est += [t - k * step, bt - h0 - k * step]
                 est.sort()
                 expect = est[len(est) // 2]
@@ -2372,7 +2376,7 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
                 # top set high, nor a few px the box's own slack; up to a row and a half for a box two rows tall)
                 # (down only: a tall box sets a top too high, never too low; moved up, entries ran into the one
                 # above them, p. 50, 463, 934)
-                reach = 1.5 if first.box.h > 1.6 * h0 else 0.9
+                reach = 1.5 if two_rows else 0.9
                 if 0.12 * step < expect - first.box.y0 < reach * step:
                     top = expect * px
                     # (and its rows' steps from there: from the tall box's top they made a pitch of 44 for 42, p. 241)
