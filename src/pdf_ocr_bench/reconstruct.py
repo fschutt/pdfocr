@@ -2361,16 +2361,19 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
                 hs_ = sorted(bt - t for t, bt in zip(rows, bottoms))
                 h0 = hs_[n // 2] if n >= 5 else min(hs_[(n - 1) // 2], page_line_h)  # (a row's usual height)
                 est = []
+                # (rows counted from the second: a first box over two rows, "ACCHO" 84 pt tall for rows 42 apart,
+                # took the grid's phase with it, and all rows agreed on a top a row high, p. 50, 934)
                 for t, bt in list(zip(rows, bottoms))[:5]:  # (its first rows: over twenty, a pitch 0.3 pt off drifts 6 pt)
-                    k = round((t - rows[0]) / step)
+                    k = round((t - rows[1]) / step) + 1 if n >= 2 else 0
                     est += [t - k * step, bt - h0 - k * step]
                 est.sort()
                 expect = est[len(est) // 2]
                 # (by less than a row: a box over rows Vision did not read, "FLE" for four, p. 980, is no
-                # top set high; and a few px is the box's own slack)
+                # top set high, nor a few px the box's own slack; up to a row and a half for a box two rows tall)
                 # (down only: a tall box sets a top too high, never too low; moved up, entries ran into the one
                 # above them, p. 50, 463, 934)
-                if 0.12 * step < expect - first.box.y0 < 0.9 * step:
+                reach = 1.5 if first.box.h > 1.6 * h0 else 0.9
+                if 0.12 * step < expect - first.box.y0 < reach * step:
                     top = expect * px
                     # (and its rows' steps from there: from the tall box's top they made a pitch of 44 for 42, p. 241)
                     rows = [expect] + rows[1:]
@@ -3015,7 +3018,9 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
             continue
         rows = max(1, wrap_lines(plain(b.item.text), b.w, b.size, _times(b.item.italic)))
         y0, y1 = b.y, b.y + rows * max(b.line_h, b.size)
-        gap, least = 0.5 * b.size, min(3 * b.size, 0.8 * b.w)  # (a note already narrow may stay so)
+        # (a note already narrow may stay so; against the page's edge, two em: a paragraph's lines printed out
+        # to 1697 left 58 pt of margin, and the notes stayed over them, p. 732; its long words set it smaller)
+        gap, least = 0.5 * b.size, min(2 * b.size, 0.6 * b.w)
         def beside(p: Block) -> bool:
             p1 = p.y + max(p.fit[0] if p.fit else 1, 1) * max(p.line_h, p.size)
             return min(y1, p1) - max(y0, p.y) >= 0.3 * b.size
@@ -3497,7 +3502,10 @@ def fit_round(target: Path, page_blocks: dict[int, list[Block]], pages_meta: lis
                     size = min(0.98 * b.size, own)
                     # (10% for a paragraph of ten printed lines and more: its room is what they
                     # took, and the estimate breaks no word where azul hyphenates, p. 1046)
-                    least = 0.9 if b.fit and b.fit[0] >= 10 else 0.94
+                    # (8% for an entry of three printed rows or fewer: our typeface runs a few % wider than print
+                    # on some lines, and a short entry has no slack, its one row 677 pt for print's 650, p. 900, 382, 765.
+                    # Our shaper and azul agree on the wrap: no engine fault)
+                    least = 0.9 if b.fit and b.fit[0] >= 10 else (0.92 if b.fit and b.fit[0] <= 3 else 0.94)
                     if room_lines >= 1 and size >= least * level:
                         b.size = size
                         _follow_size(b)
