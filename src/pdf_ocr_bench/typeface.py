@@ -974,6 +974,22 @@ def _cached_shapes(cache: Path, pages: list[dict], dirs: list[Path], log) -> dic
     return averaged
 
 
+def same_vertical_metrics(paths: list[Path]) -> None:
+    """One ascent and descent for the family's faces, the largest of each: a line box is set from each
+    face's own (CSS), and a row with an italic word in it, Italic 762/293 beside Regular 744/316, stood
+    1.3 pt taller than the rows round it at 42 pt (p. 466)."""
+    from fontTools.ttLib import TTFont
+
+    fonts = [TTFont(str(p)) for p in paths]
+    ascent = max(f["hhea"].ascent for f in fonts)
+    descent = max(-f["hhea"].descent for f in fonts)
+    for f, p in zip(fonts, paths):
+        f["hhea"].ascent, f["hhea"].descent = ascent, -descent
+        os2 = f["OS/2"]
+        os2.sTypoAscender, os2.sTypoDescender, os2.usWinAscent, os2.usWinDescent = ascent, -descent, ascent, descent
+        f.save(str(p))
+
+
 def build(out: Path, family: str = "Book", workers: int = 4, log=print) -> Path:
     """All four steps for a `reconstruct` run in `out` (its work/ directory): writes
     out/typeface/ with FAMILY-Regular.ttf, FAMILY-Italic.ttf, each glyph as SVG, and
@@ -997,6 +1013,7 @@ def build(out: Path, family: str = "Book", workers: int = 4, log=print) -> Path:
     build_font("roman", averaged, measured, names["roman"], target / files["roman"], svg_dir=target / "svg")
     build_font("italic", averaged, measured, names["italic"], target / files["italic"], fallback=("roman", averaged),
                svg_dir=target / "svg")
+    same_vertical_metrics([target / files["roman"], target / files["italic"]])
     counts = {f"{st}:{c}": n for (st, c), (_, n) in averaged.items()}
     (target / "typeface.json").write_text(json.dumps(
         {"families": names, "files": files, "metrics": measured, "prints": counts}, ensure_ascii=False, indent=1))

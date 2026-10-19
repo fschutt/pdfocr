@@ -3,15 +3,6 @@
 version = 4
 
 [[package]]
-name = "accesskit"
-version = "0.24.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d3b7f7f85a7e5f68090000ed7622545829afd484d210358702ae4cb97dd0c320"
-dependencies = [
- "uuid",
-]
-
-[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -152,7 +143,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 [[package]]
 name = "azul-core"
 version = "0.0.16"
-source = "git+https://github.com/fschutt/azul?branch=fix%2Finput-bugs-2026-09-19#0f84e0652e4ae7425ce58b1f31322a4879b0bc45"
+source = "git+https://github.com/fschutt/azul?branch=fix%2Finput-bugs-2026-09-19#442fd324ed2bdd6edccec2d290a3dd94b1e50e57"
 dependencies = [
  "azul-css",
  "gl-context-loader",
@@ -163,7 +154,7 @@ dependencies = [
 [[package]]
 name = "azul-css"
 version = "0.0.16"
-source = "git+https://github.com/fschutt/azul?branch=fix%2Finput-bugs-2026-09-19#0f84e0652e4ae7425ce58b1f31322a4879b0bc45"
+source = "git+https://github.com/fschutt/azul?branch=fix%2Finput-bugs-2026-09-19#442fd324ed2bdd6edccec2d290a3dd94b1e50e57"
 dependencies = [
  "azul-simplecss",
  "libm",
@@ -172,9 +163,8 @@ dependencies = [
 [[package]]
 name = "azul-layout"
 version = "0.0.16"
-source = "git+https://github.com/fschutt/azul?branch=fix%2Finput-bugs-2026-09-19#0f84e0652e4ae7425ce58b1f31322a4879b0bc45"
+source = "git+https://github.com/fschutt/azul?branch=fix%2Finput-bugs-2026-09-19#442fd324ed2bdd6edccec2d290a3dd94b1e50e57"
 dependencies = [
- "accesskit",
  "allsorts-azul",
  "azul-core",
  "azul-css",
@@ -572,7 +562,6 @@ name = "html2pdf"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "azul-layout",
  "clap",
  "printpdf",
  "serde",
@@ -1305,12 +1294,6 @@ name = "utf8parse"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
-
-[[package]]
-name = "uuid"
-version = "1.28.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7cc1186384beb7dd8eedea376413fd654937285ea6c9cfbb928dc3043ea4b606"
 
 [[package]]
 name = "version_check"

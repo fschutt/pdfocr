@@ -117,6 +117,7 @@ def to_items(answer: dict, lines: list, layout: PageLayout):
                 for k, a in enumerate(answered)}
     _reassign(lines_of, answered, known)
     _drop_strays(lines_of, known)
+    _drop_note_strays(lines_of, answered, known)
     items, used = [], set()
     for k, a in enumerate(answered):
         ids = lines_of[k]
@@ -435,6 +436,25 @@ def _drop_strays(lines_of: dict[int, list[str]], known: dict) -> None:
                 strays.append(i)
         for i in strays:
             ids.remove(i)
+
+
+def _drop_note_strays(lines_of: dict[int, list[str]], answered: list[dict], known: dict) -> None:
+    """A note's line far from its other lines (6 of their heights) that reads none of its words is no
+    part of it: "2 Thess. ii 1, 2." was given the text's "pearance." 460 pt below its own line, and its
+    box spanned the column (p. 173)."""
+    from .reconstruct import _norm_word, plain
+
+    for k, ids in lines_of.items():
+        if answered[k].get("kind") != "note" or len(ids) < 2:
+            continue
+        words = {_norm_word(w) for w in plain(answered[k].get("text", "")).split()} - {""}
+        h = sorted(known[i].box.h for i in ids)[len(ids) // 2]
+        for i in list(ids):
+            line = known[i]
+            rest = [known[j] for j in ids if j != i]
+            if rest and min(abs(o.box.y0 - line.box.y0) for o in rest) > 6 * h \
+                    and not {_norm_word(w) for w in line.text.split()} & words:
+                ids.remove(i)
 
 
 def _shared_pairs(line: str, text: str) -> int:

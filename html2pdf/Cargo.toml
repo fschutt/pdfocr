@@ -17,9 +17,6 @@ clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
-# only to turn on azul-layout's `a11y`: at 8b9620a2 managers/a11y.rs uses NodeHierarchyItem, whose
-# import is behind that feature, outside it - azul-layout does not build without it
-azul-layout = { version = "0.0.16", default-features = false, features = ["a11y"] }
 
 [profile.release]
 opt-level = 3
