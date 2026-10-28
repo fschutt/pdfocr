@@ -143,7 +143,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 [[package]]
 name = "azul-core"
 version = "0.0.16"
-source = "git+https://github.com/fschutt/azul?branch=fix%2Finput-bugs-2026-09-19#442fd324ed2bdd6edccec2d290a3dd94b1e50e57"
+source = "git+https://github.com/fschutt/azul?branch=fix%2Finput-bugs-2026-09-19#9dc2eb66142e84ffbe4d8e2edaabdd3fd8df5899"
 dependencies = [
  "azul-css",
  "gl-context-loader",
@@ -154,7 +154,7 @@ dependencies = [
 [[package]]
 name = "azul-css"
 version = "0.0.16"
-source = "git+https://github.com/fschutt/azul?branch=fix%2Finput-bugs-2026-09-19#442fd324ed2bdd6edccec2d290a3dd94b1e50e57"
+source = "git+https://github.com/fschutt/azul?branch=fix%2Finput-bugs-2026-09-19#9dc2eb66142e84ffbe4d8e2edaabdd3fd8df5899"
 dependencies = [
  "azul-simplecss",
  "libm",
@@ -163,7 +163,7 @@ dependencies = [
 [[package]]
 name = "azul-layout"
 version = "0.0.16"
-source = "git+https://github.com/fschutt/azul?branch=fix%2Finput-bugs-2026-09-19#442fd324ed2bdd6edccec2d290a3dd94b1e50e57"
+source = "git+https://github.com/fschutt/azul?branch=fix%2Finput-bugs-2026-09-19#9dc2eb66142e84ffbe4d8e2edaabdd3fd8df5899"
 dependencies = [
  "allsorts-azul",
  "azul-core",
@@ -189,9 +189,9 @@ dependencies = [
 
 [[package]]
 name = "azul-simplecss"
-version = "0.2.2"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "343e24eeae9f09f61afeafcc7112e8d62f965bf0c6b30cedb5f89cc0b200380f"
+checksum = "beea02de84f7d4c090ccf9a2bddcd0595105b35c2ed0c9a0ed66aca4b79559bd"
 
 [[package]]
 name = "base64"
