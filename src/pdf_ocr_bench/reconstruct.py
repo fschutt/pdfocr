@@ -608,12 +608,17 @@ def _by_column(text: str, group: list[Line], lh: float) -> list[list[Line]] | No
         return None
     head = [k for k in (_norm_word(plain(w)) for w in text.split()[:4]) if k]
 
+    import difflib
+
+    def like(a: str, b: str) -> bool:  # (a misreading allowed: "Laitly" for "Lastly", vol. 2 p. 270)
+        return a == b or (len(a) >= 4 and difflib.SequenceMatcher(None, a, b).ratio() >= 0.75)
+
     def opens(column: list[Line]) -> int:
         # (its first word among them: "of the" of "ELIONEUS, High-Priest of the", the rest of a
         # first line Vision read in pieces, is no opening, p. 604)
         top = min(column, key=lambda l: l.box.y0)
         read = [_norm_word(w) for w in top.text.split()[:6]]
-        return sum(1 for w in head if w in read) if head and head[0] in read else 0
+        return sum(1 for w in head if any(like(w, r) for r in read)) if head and any(like(head[0], r) for r in read[:3]) else 0
     first = max(range(len(columns)), key=lambda k: (opens(columns[k]), -k))
     # (only when the model's first line is not where the text begins: else its order stands, a
     # line ending in a column of its own is no part, p. 80's "Kingdom")
@@ -730,7 +735,15 @@ def _opening_line(text: str, group: list[Line]) -> Line | None:
     # (only a line above the one listed first: that one is right but for its misreadings far more
     # often, "The coman bavino an alue of Blood", and a later "Then the Woman came" is no start, p. 355)
     hits = [l for l in group if opens(l) and l.box.y0 < group[0].box.y0 - 0.5 * max(l.box.h, 1)]
-    return min(hits, key=lambda l: l.box.y0) if hits else None
+    if hits:
+        return min(hits, key=lambda l: l.box.y0)
+    # (or below it, reading the text's first three words as its own first three: a stray line at the page's
+    # top listed first set "Lastly, the Word Mystery" 2600 pt above its print, vol. 2 p. 270)
+    if len(head) >= 3:
+        exact = [l for l in group if [k for k in (_norm_word(w) for w in l.text.split()) if k][:3] == head[:3]]
+        if exact:
+            return min(exact, key=lambda l: l.box.y0)
+    return None
 
 
 def _read_from(text: str, line: Line) -> int:
@@ -1636,7 +1649,8 @@ def _majority_zone(group: list[Line], default: str) -> str:
 FOOT_MARK = re.compile(r"\s*(?:<sup>[^<]{1,3}</sup>|<i>[a-z]</i>\s|[ᵃᵇᶜᵈᵉᶠᵍʰⁱʲᵏˡᵐⁿᵒᵖʳˢᵗᵘᵛʷˣʸᶻºª*†‡§‖¶])")
 # a footnote's mark as a letter by itself before a capital ("k Herod. l. i. c. 181.", p. 313): no
 # paragraph starts so (a margin note may: "a Genes. ii. 13.")
-LETTER_MARK = re.compile(r"\s*[a-z] (?:<i>)?[A-Z\u0590-\u05ff]")
+# (or a figure: "a 2 Kings xvi. 6.", "c 1 Kings xi. 23.", vol. 2 p. 618)
+LETTER_MARK = re.compile(r"\s*[a-z] (?:<i>)?[A-Z0-9\u0590-\u05ff]")
 NOTE_TEXT = 0.79  # margin notes' size to the text's (vol. 1: the median of 754 pages, p10 0.71)
 FOOT_TEXT = 0.84  # footnotes' size to the text's (vol. 1's median)
 WRAP_QUANTILE = 0.1  # the paragraphs a page's text size is to fit in their printed lines: all but a tenth
@@ -2537,6 +2551,16 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
                     if col is not None and (len(rows) == 1 or all(col[0] - 2 * lh_ <= l.box.x0 and l.box.x1 <= col[1] + 2 * lh_ for l in group)):
                         measure = (col[0], col[1] + 0.01 * (col[1] - col[0]))
                         ex0, ex1 = max(ex0, col[0]), min(ex1, col[1])
+            if measure is None and item.kind == "paragraph" and columns_measured and len(rows) >= 2 \
+                    and wrap_lines(plain(item.text), (ex1 - ex0) * px, size0, _times(item.italic)) > 1.6 * len(rows):
+                # its lines read only the left pieces of its rows (Vision lost the rest, or garbled it): its text
+                # needs far more rows at their width than it has; the measured column it starts in (174 pt wide
+                # for 700, vol. 2 p. 700)
+                col = next(((m0, m1) for m0, m1 in columns_measured
+                            if m0 - layout.line_height <= ex0 <= m0 + 3 * layout.line_height and m1 > ex1), None)
+                if col is not None:
+                    measure = (col[0], col[1] + 0.01 * (col[1] - col[0]))
+                    ex1 = col[1]
             if measure is not None:
                 # the column's text measure, as its paragraphs are printed (its zone may take in a
                 # note margin, or the gutter); out to its own lines where they are printed a little

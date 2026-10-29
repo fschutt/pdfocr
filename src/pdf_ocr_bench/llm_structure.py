@@ -118,6 +118,7 @@ def to_items(answer: dict, lines: list, layout: PageLayout):
     _reassign(lines_of, answered, known)
     _drop_strays(lines_of, known)
     _drop_note_strays(lines_of, answered, known)
+    _add_split_siblings(lines_of, answered, known)
     items, used = [], set()
     for k, a in enumerate(answered):
         ids = lines_of[k]
@@ -436,6 +437,33 @@ def _drop_strays(lines_of: dict[int, list[str]], known: dict) -> None:
                 strays.append(i)
         for i in strays:
             ids.remove(i)
+
+
+def _add_split_siblings(lines_of: dict[int, list[str]], answered: list[dict], known: dict) -> None:
+    """The other pieces of a Vision line the layout's zones cut (L68a | L68b), which no item has, go to the
+    item that has one of them when its text reads them: the model listed only the left pieces, cut by a
+    note strip the layout found inside the column, and the paragraph was set 186 pt wide (vol. 2 p. 421)."""
+    from .reconstruct import _norm_word, plain
+
+    owned = {i for ids in lines_of.values() for i in ids}
+    by_base: dict[str, list[str]] = {}
+    for i in known:
+        m = re.match(r"(L\d+)[a-z]$", i)
+        if m:
+            by_base.setdefault(m.group(1), []).append(i)
+    for k, ids in lines_of.items():
+        words = {_norm_word(w) for w in plain(answered[k].get("text", "")).split()} - {""}
+        for i in list(ids):
+            m = re.match(r"(L\d+)[a-z]$", i)
+            if not m:
+                continue
+            for sib in sorted(by_base.get(m.group(1), [])):
+                if sib in owned:
+                    continue
+                read = [k_ for k_ in (_norm_word(w) for w in known[sib].text.split()) if k_]
+                if read and sum(1 for w in read if w in words) >= 0.6 * len(read):
+                    ids.insert(ids.index(i) + 1, sib)
+                    owned.add(sib)
 
 
 def _drop_note_strays(lines_of: dict[int, list[str]], answered: list[dict], known: dict) -> None:
