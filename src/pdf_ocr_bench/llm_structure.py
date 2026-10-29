@@ -56,6 +56,81 @@ with that letter, though the OCR lines may not contain it.
 - align: justify for running text, center for centred lines, left or right otherwise.
 - italic: true when the item is (mostly) set in italic type (its upright words then marked with <i>)."""
 
+def table_regions(lines: list, layout: PageLayout) -> list:
+    """Where a page is set as a table (a chronology with its years, a list of governors, a table of coins):
+    [(box, rows, columns)]. In a text zone, a run of four printed rows or more whose rows hold two or more
+    pieces two line heights apart and narrower than the zone's prose, starting at columns most rows share;
+    or a zone mostly of short pieces in shared columns (Vision reads a table of figures as such)."""
+    from .page_layout import Box
+
+    lh = layout.line_height
+    out = []
+    for z in layout.zones:
+        if z.role not in ("column", "text"):
+            continue
+        zl = sorted((l for l in lines if l.zone == z.id and l.text.strip()), key=lambda l: l.box.y0)
+        # (and the figures beside it: a chronology's years may be a note strip of their own, p. 84, 1037)
+        near = [l for l in lines if l.zone != z.id and re.fullmatch(r"\s*\d{1,4}\.?\s*", l.text)
+                and z.box.y0 <= (l.box.y0 + l.box.y1) / 2 <= z.box.y1 and z.box.x0 - 6 * lh <= l.box.x0 <= z.box.x1 + 6 * lh]
+        if len([l for l in zl if re.fullmatch(r"\s*\d{1,4}\.?\s*", l.text)]) + len(near) >= 5 and len(zl) >= 6:
+            ls = zl + near
+            out.append((Box(min(l.box.x0 for l in ls), min(l.box.y0 for l in ls), max(l.box.x1 for l in ls),
+                            max(l.box.y1 for l in ls)), len(ls), 2))
+            continue
+        if len(zl) < 6:
+            continue
+
+        def columns(ls: list) -> list:
+            cols: list[list[float]] = []
+            for x in sorted(l.box.x0 for l in ls):
+                if cols and x - cols[-1][-1] < 1.5 * lh:
+                    cols[-1].append(x)
+                else:
+                    cols.append([x])
+            return cols
+
+        rows: list[list] = []
+        for l in zl:  # (1.0 line: old-style figures stand lower than the words of their row)
+            if rows and abs(l.box.y0 - rows[-1][0].box.y0) < 1.0 * lh:
+                rows[-1].append(l)
+            else:
+                rows.append([l])
+
+        def tabular(r: list) -> bool:
+            r = sorted(r, key=lambda l: l.box.x0)
+            gaps = [b.box.x0 - a.box.x1 for a, b in zip(r, r[1:])]
+            return len(r) >= 2 and all(g >= 2 * lh for g in gaps) and max(l.box.w for l in r) < 0.6 * z.box.w
+
+        run: list = []
+        for r in rows + [None]:
+            if r is not None and tabular(r):
+                run.append(r)
+                continue
+            if len(run) >= 4 and sum(1 for c in columns([l for row in run for l in row]) if len(c) >= 0.6 * len(run)) >= 2:
+                ls = [l for row in run for l in row]
+                out.append((Box(min(l.box.x0 for l in ls), min(l.box.y0 for l in ls), max(l.box.x1 for l in ls),
+                                max(l.box.y1 for l in ls)), len(run), 2))
+            run = []
+        short = [l for l in zl if l.box.w < 0.35 * z.box.w]
+        if not any(b.y0 <= zl[0].box.y0 and b.y1 >= zl[-1].box.y1 for b, _, _ in out) and len(short) >= 12 \
+                and len(short) >= 0.5 * len(zl) and sum(1 for c in columns(short) if len(c) >= 3) >= 3:
+            out.append((Box(min(l.box.x0 for l in zl), min(l.box.y0 for l in zl), max(l.box.x1 for l in zl),
+                            max(l.box.y1 for l in zl)), len(rows), 3))
+    return out
+
+
+def _table_feedback(regions: list, lines: list) -> str:
+    inside = [[l.id for l in lines if b.x0 - 5 <= l.box.x0 and l.box.x1 <= b.x1 + 5 and b.y0 - 5 <= l.box.y0 and l.box.y1 <= b.y1 + 5]
+              for b, _, _ in regions]
+    where = "; ".join(f"lines {ids[0]}..{ids[-1]}" for ids in inside if ids)
+    return ("\n\nThis page holds a table (" + where + "). Give each table as ONE item of kind \"table\": its "
+            "\"rows\" are the printed rows, each a list of its cells' texts left to right as printed (an empty "
+            "string for an empty cell; a cell's text may run over several printed lines; keep <i> marks), its "
+            "\"lines\" all the OCR lines of the table, its \"text\" the cells' texts in reading order. Headers of "
+            "the table are its first rows. Everything else on the page as before. If there is no table after all, "
+            "answer as before without a table item.")
+
+
 SCHEMA = {
     "type": "object",
     "properties": {
@@ -78,6 +153,12 @@ SCHEMA = {
     },
     "required": ["items"],
 }
+
+# the schema for a page asked again about its table: a "table" item with its rows of cells
+TABLE_SCHEMA = json.loads(json.dumps(SCHEMA))
+TABLE_SCHEMA["properties"]["items"]["items"]["properties"]["kind"]["enum"].append("table")
+TABLE_SCHEMA["properties"]["items"]["items"]["properties"]["rows"] = {
+    "type": "array", "items": {"type": "array", "items": {"type": "string"}}}
 
 
 def page_prompt(layout: PageLayout, lines: list, semantic_context: str) -> str:
@@ -132,9 +213,15 @@ def to_items(answer: dict, lines: list, layout: PageLayout):
         # no lines of its own (a margin note or a title line the model read from the scan, which
         # Vision ran into the line beside it or did not read): kept, placed by its words
         zone = a.get("zone") if a.get("zone") in zones else (known[ids[0]].zone if ids else "")
+        rows = None
+        if a.get("kind") == "table":
+            rows = [[clean_marks(normalize_markup(str(c))) for c in row] for row in (a.get("rows") or []) if isinstance(row, list)]
+            if len(rows) < 2 or max((len(r) for r in rows), default=0) < 2:
+                a = {**a, "kind": "paragraph"}  # (no table after all)
+                rows = None
         items.append(Item(zone=zone, text=text, lines=ids, kind=a.get("kind", "paragraph"),
                           drop_cap=(a.get("drop_cap") or "")[:1], align=a.get("align") or "justify",
-                          italic=bool(a.get("italic")), label=str(a.get("zone") or "")))
+                          italic=bool(a.get("italic")), label=str(a.get("zone") or ""), rows=rows))
     _join_split(items, known)  # (before the trim: a trimmed paragraph ends mid-sentence)
     _trim_repeated(items, known)
     _drop_doubled_notes(items)
@@ -619,6 +706,26 @@ class Structurer:
                         shutil.copyfile(pw / "margin.jsonl", pw / "response.jsonl")
                         answer, items, result = again, items2, result2
                         log.info(f"{r['name']}: margin notes asked again: {missed} -> {missed2} of {total} words unread")
+        if items is not None and not (pw / "table_asked").exists() and not self.limited.is_set() \
+                and not any(it.kind == "table" for it in items):
+            # a table on the page (its rows of cells set as lines one by one ran into each other): asked once
+            # more for it as a table; that answer is kept when it holds one
+            regions = table_regions(r["lines"], r["layout"])
+            if regions:
+                (pw / "table_asked").write_text(f"{len(regions)} table regions\n", encoding="utf-8")
+                content, _ = claude_cli.page_content(self.work / r["name"] / "native.png", pw)
+                content.append({"type": "text", "text": prompt + _table_feedback(regions, r["lines"])})
+                again, result2 = claude_cli.ask(content, self.system, TABLE_SCHEMA, pw, self.model, zoom=self.zoom,
+                                                thinking=self.thinking, name="table")
+                if again is None and (result2.get("api_error_status") == 429
+                                      or LIMIT_HIT.search(str(result2.get("result") or result2.get("error") or ""))):
+                    self.limited.set()
+                    (pw / "table_asked").unlink(missing_ok=True)  # (asked again on the next run)
+                items2 = to_items(again, r["lines"], r["layout"]) if again else None
+                if items2 is not None and any(it.kind == "table" for it in items2):
+                    shutil.copyfile(pw / "table.jsonl", pw / "response.jsonl")
+                    answer, items, result = again, items2, result2
+                    log.info(f"{r['name']}: asked again for its table: {sum(it.kind == 'table' for it in items)} table(s)")
         if items is None:
             log.warning(f"{r['name']}: no usable answer ({result.get('subtype') or result.get('error') or result.get('result') or 'lost text'}); heuristic structure")
         else:

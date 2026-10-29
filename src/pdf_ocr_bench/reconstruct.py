@@ -74,6 +74,7 @@ class Item:
     align: str = "justify"  # justify | left | center | right
     italic: bool = False
     label: str = ""  # the zone the model named (footnotes0: a footnote, whatever zone it stands in)
+    rows: list | None = None  # a table's rows of cells (kind "table"), each cell's text with its marks
 
 
 # --- 1. rendering ----------------------------------------------------------------------------
@@ -2405,6 +2406,17 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
                         steps = [s_ for s_ in steps if 0.7 * page_step <= s_ <= 1.4 * page_step] or steps
                     pitch = steps[len(steps) // 2] * px if steps else pitch
         steps_pt = tuple(s * px for s in steps)
+        if item.kind == "table" and item.rows:
+            # a table: one block over the printed box of its lines, set by the engine's own table layout
+            # (the cells as lines one by one wrapped and ran into each other: p. 84, 744, vol. 3 p. 577)
+            real = [l for l in group if not l.id.startswith("X")] or group
+            tx0, tx1 = min(l.box.x0 for l in real), max(l.box.x1 for l in real)
+            ty0 = min(l.box.y0 for l in real)
+            m = measured_em(item, real, ink, px)
+            size = m[0] if m else size0
+            b_ = Block(item, tx0 * px, ty0 * px, (tx1 - tx0) * px * 1.02, size, 1.15 * size, "left")
+            blocks.append(b_)
+            continue
         if item.kind == "heading" and (len(group) == 1 or n == 1):
             # one line as printed (in one piece or several Vision read apart: "(10" and ")" of the
             # page number were set in a column-wide box, over the running head beside it, p. 35):
@@ -3280,6 +3292,17 @@ def _pos(x: float, y: float, w: float, height_pt: float, width_pt: float) -> str
     return f"left: {100 * x / width_pt:.4f}%; top: {100 * y / height_pt:.4f}%; width: {100 * w / width_pt:.4f}%;"
 
 
+def _table_html(item: Item, italic: bool) -> str:
+    """A table's rows of cells as an HTML table the engine lays out (its columns as wide as their cells)."""
+    n = max(len(r) for r in item.rows)
+    rows = []
+    for r in item.rows:
+        cells = list(r) + [""] * (n - len(r))
+        rows.append("<tr>" + "".join(f'<td style="vertical-align: top; padding: 0 0.4em 0 0;">{marked_html(c, italic)}</td>'
+                                      for c in cells) + "</tr>")
+    return f'<table style="width: 100%; border-collapse: collapse;">{"".join(rows)}</table>'
+
+
 def _block(item: Item, x: float, y: float, w: float, size: float, line_h: float, align: str,
            width_pt: float, height_pt: float, indent: float = 0.0, nowrap: bool = False,
            letter_spacing: float = 0.0, invisible: bool = False) -> str:
@@ -3297,6 +3320,8 @@ def _block(item: Item, x: float, y: float, w: float, size: float, line_h: float,
     attrs = f'data-zone="{item.zone}" data-role="{item.kind}"' + (f' data-lines="{" ".join(item.lines)}"' if item.lines else "")
     if item.italic and TYPEFACE:
         attrs += ' data-italic="1"'  # (html2pdf's long-s repair reads italic words apart)
+    if item.kind == "table" and item.rows:
+        return f'<div class="region" {attrs} style="{style}">{_table_html(item, item.italic)}</div>'
     return f'<div class="region" {attrs} style="{style}"><p{p_style}>{marked_html(item.text, item.italic)}</p></div>'
 
 
