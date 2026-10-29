@@ -520,7 +520,8 @@ class Block:
     cap_room: tuple = ()  # its drop capital's room: (width pt, the capital's picture, its width, height, left in it)
 
 
-def table_columns(item: Item, group: list[Line], em: float, x0: float, x1: float, width: float = 0.0) -> dict | None:
+def table_columns(item: Item, group: list[Line], em: float, x0: float, x1: float, width: float = 0.0,
+                  rules: list = ()) -> dict | None:
     """Where a table's columns and cells stand in print, from the OCR lines its cells begin with: each
     column's share of the table's width (x0..x1, scan px), and each cell's alignment (a number set flush
     right, a total under its column, a number beside the last line of its entry or beside a brace in the
@@ -592,6 +593,12 @@ def table_columns(item: Item, group: list[Line], em: float, x0: float, x1: float
             return None
         med = at[len(at) // 2]
         xs.append(min(x for x in at if x >= med - 3 * em))  # (a word of another column read alike: not its start)
+    # (a rule a little left of a column's start, or over it: the column's own, the column from it)
+    borders = {}
+    for rx0, rx1, rw in rules:
+        c = min(range(1, n), key=lambda c: abs(xs[c] - rx1), default=None)
+        if c is not None and -1.5 * em < xs[c] - rx1 < 2 * em:
+            xs[c], borders[c] = rx0, rw
     if any(b - a < em for a, b in zip(xs, xs[1:] + [x1])):
         return None
     ends = xs[1:] + [x1]
@@ -656,7 +663,7 @@ def table_columns(item: Item, group: list[Line], em: float, x0: float, x1: float
     for c in range(n):
         ps = sorted(v[2] for k, v in cells.items() if int(k.split(",")[1]) == c and v[0] == "left")
         pads.append(ps[len(ps) // 2] if ps else 0.0)
-    return {"widths": widths, "spans": spans, "cells": cells, "pads": pads}
+    return {"widths": widths, "spans": spans, "cells": cells, "pads": pads, "borders": borders}
 
 
 def column_parts(item: Item, group: list[Line], lh: float) -> list[tuple[Item, list[Line]]]:
@@ -2614,8 +2621,44 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
             ty0 = min(l.box.y0 for l in real)
             m = measured_em(item, real, ink, px)
             size = m[0] if m else size0
-            b_ = Block(item, tx0 * px, ty0 * px, (tx1 - tx0) * px * 1.02, size, 1.15 * size, "left",
-                       table=table_columns(item, real, size / px, tx0, tx1, (tx1 - tx0) * 1.02))
+            em = size / px
+            ty1 = max(l.box.y1 for l in real)
+            # the table's printed rules (the scan's thin upright strokes in its box): drawn by the engine as its
+            # borders and its columns', where printed (pasted from the scan they cut through its figures where the
+            # engine sets the columns other than print, vol. 3 p. 623, 641); its cells' padding keeps the text off them
+            rules = [b for b in blocks if b.item is None and b.picture and b.w < 0.5 * size and b.h > 4 * size
+                     and b.y / px < ty1 and b.y / px + b.h / px > ty0 and tx0 - 1.5 * em <= (b.x + b.w / 2) / px <= tx1 + 1.5 * em]
+            edges = {"left": 0.0, "right": 0.0}
+            inner = []
+
+            def stroke(b: Block) -> tuple[float, float, float]:
+                # the rule's own stroke in its picture's box (the box takes in white round it, 13-16 pt): the scan's
+                # columns inked over half its height, and its weight (pt)
+                bx0, bx1, by0, by1 = int(b.x / px), int((b.x + b.w) / px) + 1, int(b.y / px), int((b.y + b.h) / px)
+                if ink is not None:
+                    cov = ink[max(0, by0):by1, max(0, bx0):bx1].sum(axis=0)
+                    on = [i for i, v in enumerate(cov) if v >= 0.5 * (by1 - by0)]
+                    if on:
+                        return bx0 + on[0], bx0 + on[-1] + 1, min(2.0, max(0.4, (on[-1] + 1 - on[0]) * px))
+                return bx0, bx1, 0.8
+
+            for b in rules:
+                rx0, rx1, weight = stroke(b)
+                b = replace(b, w=weight)
+                if abs(rx0 - tx0) < 1.5 * em:
+                    tx0, edges["left"] = min(tx0, rx0), b.w
+                elif abs(rx1 - tx1) < 1.5 * em:
+                    tx1, edges["right"] = max(tx1, rx1), b.w
+                else:
+                    inner.append((rx0, rx1, b.w))
+            at = table_columns(item, real, em, tx0, tx1, (tx1 - tx0) * 1.02, inner)
+            if at is not None:
+                at["edges"] = edges
+            elif any(edges.values()):
+                at = {"edges": edges}
+            for b in rules:
+                blocks.remove(b)
+            b_ = Block(item, tx0 * px, ty0 * px, (tx1 - tx0) * px * 1.02, size, 1.15 * size, "left", table=at)
             blocks.append(b_)
             continue
         if item.kind == "heading" and (len(group) == 1 or n == 1):
@@ -3516,8 +3559,12 @@ def _table_html(item: Item, italic: bool, at: dict | None = None) -> str:
         def td(c: int, text: str, span: int = 1) -> str:
             pads = at.get("pads") or [0.0] * n
             h, v, pad, indent, smaller = at.get("cells", {}).get(f"{ri},{c}", ("left", "top", pads[c], 0.0, 1.0))
+            if c in at.get("borders", {}) or (c == 0 and (at.get("edges") or {}).get("left")):
+                pad = max(pad, 0.25)  # (off its rule: a padding under half an em is taken as none)
             right = 0.4 if c + span < n else 0.0
             style = f"text-align: {h}; vertical-align: {v}; padding: 0 {right}em 0 {pad}em;"
+            if c in at.get("borders", {}) and span == 1:
+                style += f" border-left: {at['borders'][c]:.2f}pt solid black;"
             style += f" text-indent: {indent}em;" if indent else ""
             style += f" font-size: {smaller}em;" if smaller != 1.0 else ""
             return (f'<td{f" colspan={chr(34)}{span}{chr(34)}" if span > 1 else ""} style="{style}">'
@@ -3528,8 +3575,12 @@ def _table_html(item: Item, italic: bool, at: dict | None = None) -> str:
             continue
         tds = [td(c, text) for c, text in enumerate(cells)]
         rows.append("<tr>" + "".join(tds) + "</tr>")
-    fixed = " table-layout: fixed;" if cols else ""
-    return f'<table style="width: 100%; border-collapse: collapse;{fixed}">{cols}{"".join(rows)}</table>'
+    # (its columns as printed: across its box; else as wide as its cells, in the middle of its box, as printed:
+    # stray specks Vision read beside a table of figures made its box half the page wider, vol. 3 p. 623)
+    fixed = " width: 100%; table-layout: fixed;" if cols else " margin: 0 auto;"
+    edges = at.get("edges") or {}
+    edge = "".join(f" border-{side}: {w:.2f}pt solid black;" for side, w in edges.items() if w)  # (its rules at its edges)
+    return f'<table style="border-collapse: collapse;{fixed}{edge}">{cols}{"".join(rows)}</table>'
 
 
 def _block(item: Item, x: float, y: float, w: float, size: float, line_h: float, align: str,
