@@ -1990,7 +1990,10 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
               # (a letter mark on a note too when it is no margin note: "a Hieronym.", "c Isai." given as notes
               # 0.3-0.9 of the page wide stayed notes, stacked on one another, p. 733, 281)
               and (FOOT_MARK.match(it.text) or (LETTER_MARK.match(it.text) and (it.kind == "paragraph" or (
-                  (g0 := [by_id[i] for i in it.lines if i in by_id]) and max(l.box.x1 for l in g0) - min(l.box.x0 for l in g0) > 0.3 * layout.width))))
+                  (g0 := [by_id[i] for i in it.lines if i in by_id]) and (max(l.box.x1 for l in g0) - min(l.box.x0 for l in g0) > 0.3 * layout.width
+                  # (or a short one in the page's foot, not in a margin: vol. 2 cuts its footnote band into note
+                  # strips, "c Joseph. Antiq. l." among them, p. 668, 612, 509)
+                  or (min(l.box.y0 for l in g0) > 0.8 * layout.height and not outer_note(it, g0)))))))
               and (g := [by_id[i] for i in it.lines if i in by_id]) and min(l.box.y0 for l in g) > 0.6 * layout.height
               and not outer_note(it, g)]
     if len(marked) == 1 and main and "foot" not in marked[0].label.lower():
