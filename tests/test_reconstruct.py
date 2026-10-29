@@ -341,11 +341,14 @@ def test_drop_capital_is_the_scans_picture_over_its_letter_and_spaced_titles_are
                   ["L1", "L2", "L3"], drop_cap="T")]
     blocks = build_blocks(items, lines + [title], layout, {"dropcap0": "pictures/p_cap0.png"}, 1000, 1000)
     cap = next(b for b in blocks if b.item and b.item.kind == "dropcap")
-    assert cap.picture == "pictures/p_cap0.png"
+    assert cap.hidden and not cap.picture  # the letter, invisible, where the capital is printed
+    para = next(b for b in blocks if b.item and b.item.kind == "paragraph")
+    assert para.cap_room and para.cap_room[1] == "pictures/p_cap0.png"  # the capital in the paragraph's room for it
+    assert para.item.text.startswith("HE first")  # one block: the engine wraps the rows beside it
     heading = next(b for b in blocks if b.item and b.item.kind == "heading")
     assert heading.letter_spacing > 0.1
     page = blocks_html(blocks, 1000, 1000)
-    assert '<img class="pic" src="pictures/p_cap0.png"' in page
+    assert '<div style="float: left;' in page and '<img src="pictures/p_cap0.png"' in page
     assert "color: rgba(0, 0, 0, 0);" in page and ">T</p>" in page  # the letter, invisible: found and copied
     assert "letter-spacing:" in page
 
@@ -536,19 +539,24 @@ def test_a_paragraph_read_on_into_the_next_columns_text_ends_at_the_word_the_pri
     assert a.text.endswith("he had eaten of the for-")
 
 
-def test_a_plate_in_a_ruled_frame_is_found_and_a_page_of_text_is_none():
-    from pdf_ocr_bench.reconstruct import plate_frame
+def test_a_plate_in_thin_lines_is_found_and_a_page_of_text_is_none():
+    from pdf_ocr_bench.reconstruct import line_art_plate
 
     ink = np.zeros((2000, 1600), np.uint8)
     ink[100:104, 80:1520] = 1
     ink[1900:1904, 80:1520] = 1
     ink[100:1904, 80:84] = 1
     ink[100:1904, 1516:1520] = 1
-    ink[500:520, 300:700] = 1  # a drawing in it
-    frame = plate_frame(ink, [Line("L1", "A. Chambers for Noah", Box(300, 600, 700, 630), [], "text0")])
+    ink[500:1400:50, 300:1200] = 1  # a drawing in it, in thin lines
+    ink[500:1400, 300:1200:60] = 1
+    # (a label beside the frame's right side, its box over the side: the side still the plate's)
+    label = Line("L2", "North", Box(1490, 800, 1560, 840), [], "text0")
+    frame = line_art_plate(ink, [Line("L1", "A. Chambers for Noah", Box(300, 600, 700, 630), [], "text0"), label], 40)
     assert frame is not None and frame.x0 <= 84 and frame.x1 >= 1516 and frame.y0 <= 104 and frame.y1 >= 1900
     text = np.zeros((2000, 1600), np.uint8)
-    for y in range(100, 1900, 40):  # rows of words
+    lines = []
+    for i, y in enumerate(range(100, 1900, 40)):  # rows of words, each a line the OCR read
         for x in range(100, 1500, 60):
             text[y:y + 20, x:x + 45] = 1
-    assert plate_frame(text, []) is None
+        lines.append(Line(f"L{i}", "words " * 10, Box(100, y, 1545, y + 20), [], "text0"))
+    assert line_art_plate(text, lines, 40) is None

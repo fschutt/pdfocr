@@ -459,6 +459,41 @@ def _margin_feedback(frags: list[tuple[str, list[str], bool]]) -> str:
             "lines: [].")
 
 
+def text_left_out(answer: dict | None, lines: list) -> list[tuple[list[str], int]]:
+    """The paragraphs of an answer whose lines' text it leaves out: (their line ids, the words of four letters
+    and more of those lines neither its text nor that of an item listing one of them has), for one of three
+    lines and more of whose words they have under a quarter. (The model listed a paragraph's 14 lines under the one before it and gave only
+    that one's text, its own item empty: vol. 3 p. 278; empty paragraphs of 7-15 lines: vol. 1 p. 679, 741.)"""
+    from .reconstruct import _norm_word, plain
+
+    if not answer:
+        return []
+    text_of = {l.id: l.text for l in lines}
+    out = []
+    items = answer.get("items", [])
+    for it in items:
+        ids = it.get("lines") or []
+        if it.get("kind") != "paragraph" or len(ids) < 3:
+            continue
+        words = [w for w in (_norm_word(x) for i in ids for x in text_of.get(i, "").split()) if len(w) >= 4]
+        # (its text, and that of the items that list a line of it too: its lines listed under the paragraph before
+        # it as well, the text in an item of its own, is no text left out; the page's other words are no help,
+        # a left-out paragraph's "shall", "have", "Article" stand in others)
+        have = {_norm_word(x) for o in items if o is it or set(o.get("lines") or []) & set(ids)
+                for x in plain(o.get("text") or "").split()}
+        lacking = sum(1 for w in words if w not in have)
+        if len(words) >= 15 and lacking > 0.75 * len(words):
+            out.append((ids, lacking))
+    return out
+
+
+def _text_feedback(short: list[tuple[list[str], int]]) -> str:
+    shown = "; ".join(f"lines {ids[0]}..{ids[-1]}" for ids, _ in short)
+    return ("\n\nAn earlier answer to this page left out the text of lines it listed under a paragraph (" + shown +
+            "): every OCR line's text, corrected, must be in the text of the item that lists it. Give each "
+            "paragraph as its own item with its full text, as printed; everything else as before.")
+
+
 def _pairs(text: str) -> set[tuple[str, str]]:
     words = re.findall(r"\w+", text.lower().replace("ſ", "s").replace("f", "s"))
     return set(zip(words, words[1:]))
@@ -723,6 +758,27 @@ class Structurer:
                         shutil.copyfile(pw / "margin.jsonl", pw / "response.jsonl")
                         answer, items, result = again, items2, result2
                         log.info(f"{r['name']}: margin notes asked again: {missed} -> {missed2} of {total} words unread")
+        if items is not None and not (pw / "text_asked").exists() and not self.limited.is_set():
+            # a paragraph that leaves out the text of its own lines: asked once more, told which; the answer
+            # that leaves out fewer of their words is kept
+            short = text_left_out(answer, r["lines"])
+            if short:
+                (pw / "text_asked").write_text(f"{sum(n for _, n in short)} words left out\n", encoding="utf-8")
+                content, _ = claude_cli.page_content(self.work / r["name"] / "native.png", pw)
+                content.append({"type": "text", "text": prompt + _text_feedback(short)})
+                again, result2 = claude_cli.ask(content, self.system, SCHEMA, pw, self.model, zoom=self.zoom,
+                                                thinking=self.thinking, name="text")
+                if again is None and (result2.get("api_error_status") == 429
+                                      or LIMIT_HIT.search(str(result2.get("result") or result2.get("error") or ""))):
+                    self.limited.set()
+                    (pw / "text_asked").unlink(missing_ok=True)  # (asked again on the next run)
+                items2 = to_items(again, r["lines"], r["layout"]) if again else None
+                if items2 is not None:
+                    before, after = sum(n for _, n in short), sum(n for _, n in text_left_out(again, r["lines"]))
+                    if after < before:
+                        shutil.copyfile(pw / "text.jsonl", pw / "response.jsonl")
+                        answer, items, result = again, items2, result2
+                        log.info(f"{r['name']}: its left-out text asked again: {before} -> {after} words")
         if items is not None and not (pw / "table_asked").exists() and not self.limited.is_set() \
                 and not any(it.kind == "table" for it in items):
             # a table on the page (its rows of cells set as lines one by one ran into each other): asked once

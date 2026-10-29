@@ -409,6 +409,24 @@ def use_typeface(path: Path | None) -> None:
                     key=hashlib.sha1(b"".join(f.read_bytes() for f in files.values())).hexdigest())
 
 
+def _cap_drop(size: float, line_h: float, italic: bool = False) -> float:
+    """How far below a row's line box top its capitals begin: the half-leading and the face's ascent above its
+    capital height (CSS sets the face's ascent and descent in the middle of the line height)."""
+    key = f"vertical-{italic}"
+    if key not in _FONTS:
+        asc, desc = 0.891, 0.216  # Times
+        if TYPEFACE:
+            from fontTools.ttLib import TTFont
+
+            t = TTFont(TYPEFACE["files"]["italic" if italic else "roman"])
+            u = t["head"].unitsPerEm
+            asc, desc = t["hhea"].ascent / u, -t["hhea"].descent / u
+        _FONTS[key] = (asc, desc)
+    asc, desc = _FONTS[key]
+    cap = TYPEFACE.get("cap", TIMES_CAP) if TYPEFACE else TIMES_CAP
+    return (line_h - (asc + desc) * size) / 2 + (asc - cap) * size
+
+
 def font_family(italic: bool = False) -> str:
     """The CSS font-family of the text: the book's fonts (Times for what they lack), or Times."""
     if not TYPEFACE:
@@ -437,27 +455,29 @@ def _times(italic: bool = False):
     return _FONTS[key]
 
 
-def wrap_lines(text: str, width_pt: float, size: float, font, indent: float = 0.0) -> int:
-    """Lines `text` takes when set justified-wrapped at `size` in `width_pt` (`font`'s metrics)."""
+def wrap_lines(text: str, width_pt: float, size: float, font, indent: float = 0.0, room: tuple = ()) -> int:
+    """Lines `text` takes when set justified-wrapped at `size` in `width_pt` (`font`'s metrics); `room`: (rows,
+    pt), its first rows that much narrower (beside a drop capital)."""
     space = font.text_length(" ", size)
     lines, x = 1, indent
     for word in text.split():
         w = font.text_length(word, size)
-        if x > 0 and x + space + w > width_pt:
+        if x > 0 and x + space + w > width_pt - (room[1] if room and lines <= room[0] else 0.0):
             lines, x = lines + 1, w
         else:
             x = x + (space if x > 0 else 0) + w
     return lines
 
 
-def fit_size(text: str, width_pt: float, n_lines: int, start: float, font, indent: float = 0.0) -> float:
+def fit_size(text: str, width_pt: float, n_lines: int, start: float, font, indent: float = 0.0,
+             room: tuple = ()) -> float:
     """The largest size up to `start` at which `text` wraps to at most `n_lines` lines."""
     lo, hi = 0.35 * start, start
-    if wrap_lines(text, width_pt, hi, font, indent) <= n_lines:
+    if wrap_lines(text, width_pt, hi, font, indent, room) <= n_lines:
         return hi
     for _ in range(18):
         mid = (lo + hi) / 2
-        if wrap_lines(text, width_pt, mid, font, indent) <= n_lines:
+        if wrap_lines(text, width_pt, mid, font, indent, room) <= n_lines:
             lo = mid
         else:
             hi = mid
@@ -490,7 +510,14 @@ class Block:
     lead: int = 0  # a note: the words of its text before the first line the OCR read of it
     steps: tuple = ()  # the steps from one of its printed rows to the next, pt (what measured `pitch`)
     hidden: bool = False  # text printed inside a picture (its legend, a plate's labels): invisible, still copyable
+
+    def room(self, line_h: float = 0.0) -> tuple:
+        """(rows, pt): its first rows narrower by its drop capital's room, as many as the capital is rows tall."""
+        if not self.cap_room:
+            return ()
+        return max(1, round(self.cap_room[3] / max(line_h or self.line_h, self.size, 1e-6))), self.cap_room[0]
     table: dict | None = None  # a table: its printed columns and cells' places (table_columns)
+    cap_room: tuple = ()  # its drop capital's room: (width pt, the capital's picture, its width, height, left in it)
 
 
 def table_columns(item: Item, group: list[Line], em: float, x0: float, x1: float, width: float = 0.0) -> dict | None:
@@ -630,6 +657,7 @@ def column_parts(item: Item, group: list[Line], lh: float) -> list[tuple[Item, l
     runs = _by_column(item.text, group, lh) if not item.drop_cap else None
     if runs is None:
         runs = [[group[0]]]
+        measure = sorted(l.box.w for l in group)[len(group) // 2]
         for line in group[1:]:
             prev = runs[-1][-1]
             # back up the page, and across to another column (lines merely listed out of order stay,
@@ -645,7 +673,17 @@ def column_parts(item: Item, group: list[Line], lh: float) -> list[tuple[Item, l
             # "who", "was,", "possi-", p. 904. A gutter is wider: 40 px)
             again = any(abs(line.box.y0 - m.box.y0) < 0.5 * lh
                         and min(line.box.x1, m.box.x1) > max(line.box.x0, m.box.x0) - 0.8 * lh for m in runs[-1])
-            if line.box.y0 < prev.box.y0 - 2 * lh and abs(line.box.x0 - prev.box.x0) > 4 * lh and across and not again:
+            # (but a column further on and far up the page, its lines all above this one, is the next column: the
+            # last line of the one before, Vision's box run over the gutter, "At the same time he bid Samuel to
+            # lay" | "When God promised", set the whole paragraph at the foot of the next column, vol. 3 p. 67. A
+            # line run over the gutter from the middle of the paragraph's column is none, vol. 1 p. 295)
+            # (a measure further on: the piece of a row Vision read in two, "Images to cease out of" 443 px in,
+            # its lines listed from the foot up, vol. 2 p. 413, is in the same column)
+            later = group[group.index(line):]
+            onward = line.box.y0 < prev.box.y0 - 10 * lh and line.box.x0 - prev.box.x0 > 0.8 * measure \
+                and all(l.box.y0 < prev.box.y0 - 2 * lh for l in later)
+            if line.box.y0 < prev.box.y0 - 2 * lh and abs(line.box.x0 - prev.box.x0) > 4 * lh and (across or onward) \
+                    and not again:
                 runs.append([line])
             else:
                 runs[-1].append(line)
@@ -1284,35 +1322,42 @@ def catchword_ink(layout: PageLayout, lines: list[Line], prev: list[Line], lh: f
     return box, []
 
 
-def plate_frame(ink, lines: list[Line]) -> Box | None:
-    """The ruled frame of an engraved plate drawn in lines too thin for the layout to take it for a
-    picture (the plan of Noah's ark, p. 222): rules near all four sides of the page, round most of it,
-    with little text inside (its labels and legend). None on a page of text."""
+def line_art_plate(ink, lines: list[Line], lh: float) -> Box | None:
+    """An engraved plate drawn in lines too thin for the layout to take it for a picture (the plan of
+    Noah's ark, vol. 1 p. 222; the ground plots of the Temple, vol. 3 p. 25, 41; coins, p. 609-611): most
+    of the page's ink outside the lines the OCR read (its labels, its title, its legend), over most of the
+    page. Its box: the extent of that ink, out to the long rules a line's box took in (a frame's side).
+    None on a page of text (there, 17% at the most, on a table's page: rules and braces)."""
     import numpy as np
 
-    if ink is None or sum(1 for l in lines if len(l.text) >= 25) > 20:
+    if ink is None:
         return None
-    h, w = ink.shape[0] // 4 * 4, ink.shape[1] // 4 * 4
-    small = ink[:h, :w].reshape(h // 4, 4, w // 4, 4).max(axis=(1, 3)).astype(bool)  # (thin rules kept)
-
-    def longest(a) -> np.ndarray:  # the longest inked run down each column of `a`
-        out = np.zeros(a.shape[1], int)
-        for j in range(a.shape[1]):
-            d = np.diff(np.concatenate(([0], a[:, j].astype(np.int8), [0])))
-            starts, ends = np.where(d == 1)[0], np.where(d == -1)[0]
-            if len(starts):
-                out[j] = (ends - starts).max()
-        return out
-
-    H, W = small.shape
-    cols = np.where(longest(small) >= 0.4 * H)[0]
-    rows = np.where(longest(small.T) >= 0.5 * W)[0]
+    ink = ink.astype(bool)
+    H, W = ink.shape
+    read = np.zeros_like(ink)
+    pad = int(0.3 * lh)
+    for l in lines:
+        read[max(0, l.box.y0 - pad):l.box.y1 + pad, max(0, l.box.x0 - pad):l.box.x1 + pad] = True
+    rest = ink & ~read
+    if rest.sum() < 0.6 * max(1, ink.sum()):
+        return None
+    cols, rows = np.where(rest.sum(axis=0) >= 0.01 * H)[0], np.where(rest.sum(axis=1) >= 0.01 * W)[0]
     if not len(cols) or not len(rows):
         return None
-    left, right, top, bottom = cols.min(), cols.max(), rows.min(), rows.max()
-    if left > 0.25 * W or right < 0.75 * W or top > 0.35 * H or bottom < 0.65 * H:
+    x0, x1, y0, y1 = int(cols.min()), int(cols.max()) + 1, int(rows.min()), int(rows.max()) + 1
+    if (x1 - x0) * (y1 - y0) < 0.3 * W * H:
         return None
-    return Box(int(left * 4), int(top * 4), int(right * 4 + 4), int(bottom * 4 + 4))
+    # (a frame's side in a line's box: Vision read a label beside it; the ground plot lost its east wall, p. 41)
+    down, across = ink[y0:y1].sum(axis=0), ink[:, x0:x1].sum(axis=1)
+    reach = int(0.05 * W)
+    left = [j for j in range(max(0, x0 - reach), x0) if down[j] >= 0.25 * (y1 - y0)]
+    right = [j for j in range(x1, min(W, x1 + reach)) if down[j] >= 0.25 * (y1 - y0)]
+    reach = int(0.05 * H)
+    top = [i for i in range(max(0, y0 - reach), y0) if across[i] >= 0.25 * (x1 - x0)]
+    bottom = [i for i in range(y1, min(H, y1 + reach)) if across[i] >= 0.25 * (x1 - x0)]
+    x0, x1 = (min(left) if left else x0), (max(right) + 1 if right else x1)
+    y0, y1 = (min(top) if top else y0), (max(bottom) + 1 if bottom else y1)
+    return Box(x0, y0, x1, y1)
 
 
 def margin_rows(ink, x0: int, x1: int, y0: int, y1: int, lh: float, pitch: float = 0.0) -> list[tuple[int, int]]:
@@ -1868,7 +1913,8 @@ def wrap_size(blocks: list["Block"], cap: float, pitch: float, least: int = 4) -
             continue
         rows = max(b.fit[0], int((b.limit - b.y) / pitch + 0.15) if pitch else 0)
         # (the em space between run-in footnotes is as wide as an M, not a word space)
-        sizes.append(fit_size(plain(b.item.text).replace("\u2003", "M"), b.w, rows, cap, _times(b.item.italic), b.indent))
+        sizes.append(fit_size(plain(b.item.text).replace("\u2003", "M"), b.w, rows, cap, _times(b.item.italic), b.indent,
+                              b.room(pitch)))
     if len(sizes) < least:
         return None
     sizes.sort()
@@ -2504,6 +2550,14 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
         if page_step:
             steps = [s_ for s_ in steps if 0.7 * page_step <= s_ <= 1.4 * page_step] or steps
         pitch = steps[len(steps) // 2] * px if steps else 1.2 * size0
+        # the rows it spans, for its size: Vision draws two printed rows as one tall box, or two boxes on one
+        # row (4 row tops for 5 printed rows, 11 lines for 14 rows: the page set 12% smaller than printed, its
+        # paragraphs a row or two short, vol. 3 p. 68); not over a gap of more than a row or so (a stray line)
+        spanned = n
+        if item.kind == "paragraph" and n >= 2 and steps:
+            step_ = steps[len(steps) // 2]
+            if all(b_ - a_ <= 2.6 * step_ for a_, b_ in zip(rows, rows[1:])):
+                spanned = max(n, round((max(l.box.y1 for l in group) - rows[0] - hs_[len(hs_) // 2]) / step_) + 1)
         if item.kind == "paragraph" and part_no == 0 and n >= 2 and abs(first.box.y0 - rows[0]) < 0.5 * layout.line_height:
             # its top where its rows stand on their grid, all of them, by tops and bottoms: not its first OCR
             # box's top, which a capital, a raised mark or a margin note merged in moves by 10-25 pt (p. 727
@@ -2683,6 +2737,14 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
                 ex0, ex1 = text_edges(ink, ex0, ex1, min(l.box.y0 for l in group), max(l.box.y1 for l in group),
                                       layout.line_height, n_rows, [w for l in group for w in l.words], item.text)
             measure = measure_for(ex0, ex1) if len(rows) >= 2 or zone.role in ("column", "text") else None
+            if measure is None and item.kind == "paragraph" and len(rows) == 1 and zone.role in ("column", "text"):
+                # one short line inside a printed column (a list's entry, "St. Matthew."): that column, the line
+                # indented where it starts in it. (By both its ends it is no column's: it was set from its zone's
+                # edge, the page's margin, 120 pt left of the column and of the longer entries, vol. 3 p. 55)
+                col = next(((m0, m1) for m0, m1 in columns_measured
+                            if m0 - layout.line_height <= ex0 and ex1 <= m1 + layout.line_height), None)
+                if col is not None:
+                    measure = (col[0], col[1] + 0.01 * (col[1] - col[0]))
             widest = max((m1 - m0 for m0, m1 in columns_measured), default=0.0)
             if measure is None and columns_measured and zone.box.w > 1.4 * widest:
                 # a line in a band the layout cut across the columns (one Vision ran over the gutter): the
@@ -2810,33 +2872,34 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
                 k = max(1, len([y for y in rows if y < cut]))
                 below = [l for l in group if l.box.y0 >= cut]
                 cap_size = cap.box.h * px * 0.95
-                # the scan's own capital (plain or ornamented), over the letter as invisible text
+                # the letter as invisible text where the capital is printed (the scan's capital, plain or
+                # ornamented, is drawn in the paragraph's room for it, below)
                 blocks.append(Block(Item(item.zone, item.drop_cap, [], "dropcap"), cap.box.x0 * px, cap.box.y0 * px,
-                                    cap.box.w * px * 1.1, cap_size, cap_size, "left", nowrap=True,
-                                    picture=pictures.get(cap.id, ""), h=cap.box.h * px))
+                                    cap.box.w * px * 1.1, cap_size, cap_size, "left", nowrap=True, hidden=True))
                 if first.box.x0 < cap.box.x1:
                     # Vision's box of the first line takes in the capital: the line's own top is
                     # where the capital's top is (it stands on the first line's cap height)
                     top = cap.box.y0 * px - 0.28 * size0
-                # the lines beside the capital, narrower, starting right of it, and the rest below at
-                # the same size: the paragraph's size over its printed lines, the words beside the
-                # capital as many as its lines hold at that size (Times is not the book's face, so
-                # not always the words printed there)
+                # one block: the engine wraps its rows beside the capital round a float that holds the scan's
+                # capital (as wide as it and its gap, as tall as the rows printed beside it: its height in rows,
+                # Vision's lines beside it run together), the rest under it at the same size, the paragraph's
+                # size over its printed lines. (Cut in two by a guess of the words the rows beside it hold, those
+                # rows ended short where the engine hyphenated a word, and the rest stood a row lower: "HERE were
+                # particular Days ap-/pointed for", vol. 3 p. 290)
                 body = drop_first_letter(text, item.drop_cap)
-                bx0 = cap.box.x1 * px + 0.3 * size0
-                bw = x0 + w - bx0
-                size = fit_size(plain(body), 0.97 * w, n, size0, font)
-                count = words_fitting(body.split(), 0.97 * bw, size, font, k) if below else len(body.split())
-                beside_text, rest_text = _split_at(body, count)
-                part = dict(zone=item.zone, align=item.align, italic=item.italic)
-                blocks.append(Block(Item(text=beside_text, lines=[l.id for l in group if l not in below], **part),
-                                    bx0, top, bw, size, max(pitch, size), pitch=pitch, steps=steps_pt))
-                if plain(rest_text).strip() and below:
-                    rest = Block(Item(text=rest_text, lines=[l.id for l in below], **part),
-                                 x0, min(l.box.y0 for l in below) * px, w, size, max(pitch, size), pitch=pitch,
-                                 steps=steps_pt)
-                    rest.fit = (n - k, size, pitch)  # sized with the others, to the room below it
-                    blocks.append(rest)
+                room = cap.box.x1 * px + 0.3 * size0 - x0
+                # (its rows from the capital's top to its last line's foot: Vision runs the rows beside the capital
+                # together, and 4 rows for 5 set it 8% smaller than the rest of the page, vol. 3 p. 290)
+                if pitch:
+                    n = max(n, round((max(l.box.y1 for l in group) - cap.box.y0) * px / pitch))
+                size = fit_size(plain(body), 0.97 * w, n, size0, font, 0.0,
+                                (max(1, round(cap.box.h / (pitch / px))), room) if pitch and room > 0.5 * size0 else ())
+                block = Block(replace(item, text=body), x0, top, w, size, max(pitch, size), item.align, pitch=pitch,
+                              steps=steps_pt,
+                              cap_room=(room, pictures.get(cap.id, ""), cap.box.w * px, cap.box.h * px,
+                                        cap.box.x0 * px - x0) if room > 0.5 * size0 else ())
+                block.fit = (n, size, pitch)
+                blocks.append(block)
                 continue
         # the first-line indent: from its topmost line inside the block (Vision runs a line across
         # both columns; its piece from the other column is no indent: 717 pt in a 691 pt block
@@ -2877,7 +2940,7 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
             align = item.align if item.align != "justify" else "left"
         block = Block(item, x0, top, w, size0, max(pitch, 1.0 * size0), align, indent=indent, pitch=pitch if n >= 2 else 0.0,
                       steps=steps_pt, lead=lead_words)
-        block.fit = (n, size0, pitch)  # sized below, once the room down to the next block is known
+        block.fit = (spanned, size0, pitch)  # sized below, once the room down to the next block is known
         blocks.append(block)
 
     set_footnotes(blocks, by_id, layout.line_height, px, (text_left, text_right))
@@ -2957,7 +3020,8 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
             continue
         n, size0, pitch = b.fit
         room_lines = int((b.limit - b.y) / max(pitch, 1.0) + 0.15)
-        b.size = fit_size(plain(b.item.text), 0.97 * b.w, max(n, room_lines), size0, _times(b.item.italic), b.indent)
+        b.size = fit_size(plain(b.item.text), 0.97 * b.w, max(n, room_lines), size0, _times(b.item.italic), b.indent,
+                          b.room(pitch))
         b.line_h = max(pitch, b.size)
 
     # the page's type sizes, by area: its text, its margin notes, its footnotes (Hebrew apart), each
@@ -3258,7 +3322,8 @@ def blocks_html(blocks: list[Block], width_pt: float, height_pt: float, lang: st
                          f'height: {100 * b.h / height_pt:.4f}%;">')
         if b.item is not None:
             parts.append(_block(b.item, b.x, b.y, b.w, b.size, b.line_h, b.align, width_pt, height_pt, b.indent, b.nowrap,
-                                b.letter_spacing, invisible=bool(b.picture) or b.hidden, table=b.table))
+                                b.letter_spacing, invisible=bool(b.picture) or b.hidden, table=b.table,
+                                cap_room=b.cap_room))
     return f"""<!DOCTYPE html>
 <html lang="{htmlmod.escape(lang)}">
 <head>
@@ -3453,7 +3518,8 @@ def _table_html(item: Item, italic: bool, at: dict | None = None) -> str:
 
 def _block(item: Item, x: float, y: float, w: float, size: float, line_h: float, align: str,
            width_pt: float, height_pt: float, indent: float = 0.0, nowrap: bool = False,
-           letter_spacing: float = 0.0, invisible: bool = False, table: dict | None = None) -> str:
+           letter_spacing: float = 0.0, invisible: bool = False, table: dict | None = None,
+           cap_room: tuple = ()) -> str:
     style = _pos(x, y, w, height_pt, width_pt) + f" font-size: {size:.2f}pt; line-height: {line_h:.2f}pt; text-align: {align};"
     if item.italic:
         # (the book's italic is a font of its own: not slanted again)
@@ -3470,7 +3536,19 @@ def _block(item: Item, x: float, y: float, w: float, size: float, line_h: float,
         attrs += ' data-italic="1"'  # (html2pdf's long-s repair reads italic words apart)
     if item.kind == "table" and item.rows:
         return f'<div class="region" {attrs} style="{style}">{_table_html(item, item.italic, table)}</div>'
-    return f'<div class="region" {attrs} style="{style}"><p{p_style}>{marked_html(item.text, item.italic)}</p></div>'
+    room = ""
+    if cap_room:
+        # a drop capital's room: a float its first rows wrap round, as many as the capital is rows tall (a little
+        # short of them), the capital in it from its first row's capitals down to the capitals of the row after
+        # it, raised for that as printed (its foot ran 7 pt into that row's letters, vol. 3 p. 290)
+        w_, pic, cw, ch, dx = cap_room
+        k_ = max(1, round(ch / line_h))
+        drop = _cap_drop(size, line_h, item.italic)
+        dy = max(drop - 0.5 * line_h, min(drop, k_ * line_h + drop - ch - 0.5))
+        img = (f'<img src="{pic}" style="display: block; width: {cw:.2f}pt; height: {ch:.2f}pt; '
+               f'margin-left: {dx:.2f}pt; margin-top: {dy:.2f}pt;">' if pic else "")
+        room = f'<div style="float: left; width: {w_:.2f}pt; height: {(k_ - 0.25) * line_h:.2f}pt;">{img}</div>'
+    return f'<div class="region" {attrs} style="{style}">{room}<p{p_style}>{marked_html(item.text, item.italic)}</p></div>'
 
 
 # --- the pipeline ----------------------------------------------------------------------------
@@ -3489,7 +3567,7 @@ def _write_zip(target: Path, metadata: dict, pages_meta: list[dict], out: Path) 
             z.write(out / p["html"], p["html"])
         used = set()  # the pictures the pages show (a capital no paragraph opens with is left out)
         for p in pages_meta:
-            used.update(re.findall(r'<img class="pic" src="(pictures/[^"]+)"', (out / p["html"]).read_text(encoding="utf-8")))
+            used.update(re.findall(r'<img[^>]* src="(pictures/[^"]+)"', (out / p["html"]).read_text(encoding="utf-8")))
         for rel in sorted(used):
             if (out / rel).exists():
                 z.write(out / rel, rel)
@@ -3520,11 +3598,13 @@ def fit_round(target: Path, page_blocks: dict[int, list[Block]], pages_meta: lis
             # when they meet over a tenth of the smaller one's area: a note's last line 0.4 em into
             # the next note, a paragraph's into a long one below, never was (p. 362, 461, 562)
             e = drawn[k]
-            if not e:
+            if not e or regions[k].hidden:
                 return []
-            out = set(j for j in report["regions"][k].get("overlaps", []) if j < len(regions))
+            # (nor an invisible block's: a drop capital's letter, over the capital the paragraph's room for it
+            # holds, set the paragraph a step smaller each round, and with it the page's others, vol. 3 p. 278)
+            out = set(j for j in report["regions"][k].get("overlaps", []) if j < len(regions) and not regions[j].hidden)
             for j, o in enumerate(drawn):
-                if j == k or not o or j >= len(regions):
+                if j == k or not o or j >= len(regions) or regions[j].hidden:
                     continue
                 em = min(regions[k].size, regions[j].size)
                 if min(e["x1"], o["x1"]) - max(e["x0"], o["x0"]) > 0.3 * em and min(e["y1"], o["y1"]) - max(e["y0"], o["y0"]) > 0.2 * em:
@@ -3709,7 +3789,8 @@ def fit_round(target: Path, page_blocks: dict[int, list[Block]], pages_meta: lis
                         room_lines = b.fit[0]  # (11.76 rows of room for 12 printed is room for 12, p. 358)
                     # (at 99% of its width: the shaper measures as azul sets; at 97% the size it asked was 3% too small,
                     # past the 6% allowed, for entries a gutter's few pt made a row too long, p. 382, 765, 900)
-                    own = fit_size(plain(b.item.text), 0.99 * b.w, max(room_lines, 1), b.size, _times(b.item.italic), b.indent)
+                    own = fit_size(plain(b.item.text), 0.99 * b.w, max(room_lines, 1), b.size, _times(b.item.italic), b.indent,
+                                   b.room())
                     size = min(0.98 * b.size, own)
                     # (10% for a paragraph of ten printed lines and more: its room is what they
                     # took, and the estimate breaks no word where azul hyphenates, p. 1046)
@@ -3880,8 +3961,8 @@ def reconstruct(pdf_path: Path, out: Path, pages: list[int], lang: tuple[str, ..
         layout = r.get("layout")
         if layout is not None and not any(z.role == "picture" and z.box.w * z.box.h > 0.3 * layout.width * layout.height
                                           for z in layout.zones):
-            # a plate drawn in thin lines in a ruled frame: the scan's picture of it, its labels invisible
-            frame = plate_frame(_ink(work / r["name"] / "native.png"), r["lines"])
+            # a plate drawn in thin lines: the scan's picture of it, its labels invisible
+            frame = line_art_plate(_ink(work / r["name"] / "native.png"), r["lines"], layout.line_height)
             if frame is not None:
                 from PIL import Image
 
@@ -3892,7 +3973,7 @@ def reconstruct(pdf_path: Path, out: Path, pages: list[int], lang: tuple[str, ..
                     im.crop((frame.x0, frame.y0, frame.x1, frame.y1)).save(out / rel, optimize=True)
                 r["layout"] = replace(layout, zones=layout.zones + [zone])
                 r["pictures"] = {**r["pictures"], zone.id: rel}
-                log.info(f"{r['name']}: a plate in a ruled frame, set as its picture")
+                log.info(f"{r['name']}: a plate in thin lines, set as its picture")
         width_pt, height_pt = r["size"]
         page_blocks[n] = build_blocks(structures[n], r["lines"], r["layout"], r["pictures"], width_pt, height_pt,
                                       ink=_ink(work / r["name"] / "native.png"))
