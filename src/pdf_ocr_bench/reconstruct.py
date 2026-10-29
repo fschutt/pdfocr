@@ -29,6 +29,8 @@ Output: `out/pages.zip` (metadata.json, page_NNN.html, pictures/), which `html2p
 
 from __future__ import annotations
 
+import difflib
+import functools
 import html as htmlmod
 import json
 import os
@@ -488,6 +490,135 @@ class Block:
     lead: int = 0  # a note: the words of its text before the first line the OCR read of it
     steps: tuple = ()  # the steps from one of its printed rows to the next, pt (what measured `pitch`)
     hidden: bool = False  # text printed inside a picture (its legend, a plate's labels): invisible, still copyable
+    table: dict | None = None  # a table: its printed columns and cells' places (table_columns)
+
+
+def table_columns(item: Item, group: list[Line], em: float, x0: float, x1: float, width: float = 0.0) -> dict | None:
+    """Where a table's columns and cells stand in print, from the OCR lines its cells begin with: each
+    column's share of the table's width (x0..x1, scan px), and each cell's alignment (a number set flush
+    right, a total under its column, a number beside the last line of its entry or beside a brace in the
+    middle), a row of one cell across the table ("VII Age 538 years ..." over its two columns). None when a
+    column's start is not found: the engine then sizes the columns by their cells (a plate's legend in four
+    columns ran its third into the title set between them, p. 408)."""
+    n = max(len(r) for r in item.rows)
+    if n < 2:
+        return None
+
+    def heads(text: str, k: int) -> list[str]:
+        return [w for w in (_norm_word(w) for w in plain(text).split()) if w][:k]
+
+    @functools.lru_cache(maxsize=None)
+    def alike(w: str, u: str) -> bool:
+        return w == u or (len(w) >= 4 and abs(len(w) - len(u)) <= 2
+                          and difflib.SequenceMatcher(None, w, u).ratio() >= 0.8)
+
+    def score(cell: str, line: Line) -> int:
+        # its first word, or a word of four letters among the first, read alike (Vision read the italic "9"
+        # "10" "11." of a plate's legend "o", "to", "u.", and "City" "Cily", p. 408): the words it shares
+        cw, lw = heads(cell, 5), heads(line.text, 6)
+        if not cw or not lw:
+            return 0
+        hits = [w for w in cw if any(alike(w, u) for u in lw)]
+        if cw[0] != lw[0] and not any(len(w) >= 4 for w in hits):
+            return 0
+        return len(hits) + (cw[0] == lw[0])
+
+    # (a line for the cell it reads best: "2. Elijah's Cave." took "o The place of Elijah's famous Sacrifice.")
+    best = {id(l): max((score(t, l) for r in item.rows for t in r if t.strip()), default=0) for l in group}
+
+    def begins(cell: str, line: Line) -> bool:
+        s_ = score(cell, line) if cell.strip() else 0
+        return s_ > 0 and s_ >= best[id(line)]
+
+    lines = sorted(group, key=lambda l: (l.box.y0, l.box.x0))
+    anchors: list[Line | None] = []  # each row's first cell's line: the rows in print order
+    y = -1e9
+    for r in item.rows:
+        # (a line once: "1. Mount Carmel." and "2. Elijah's Cave." both begin "2. Mount Carmel." as Vision read it)
+        cands = [l for l in lines if r and r[0].strip() and l.box.y0 >= y - 0.5 * em and l not in anchors
+                 and begins(r[0], l)]
+        top = min((l.box.y0 for l in cands), default=None)
+        found = min((l for l in cands if l.box.y0 <= top + 0.5 * em), key=lambda l: l.box.x0, default=None)
+        anchors.append(found)
+        if found is not None:
+            y = found.box.y0
+    nexts = [next((b.box.y0 for b in anchors[i + 1:] if b is not None), None) for i in range(len(anchors))]
+    found_at: dict[tuple[int, int], Line] = {}
+    for ri, (r, a) in enumerate(zip(item.rows, anchors)):
+        if a is None:
+            continue
+        found_at[ri, 0] = a
+        below = (nexts[ri] - 0.3 * em) if nexts[ri] is not None else a.box.y0 + 3 * em
+        for c in range(1, len(r)):
+            if r[c].strip() and score(r[c], a) > 0:
+                continue  # (Vision ran it into the row's first line, "57 4. Gabinius.": where it starts is not known)
+            cands = [l for l in lines if r[c].strip() and l is not a and l.box.x0 > a.box.x0
+                     and a.box.y0 - 0.6 * em <= l.box.y0 <= below and begins(r[c], l)]
+            if cands:
+                # (the leftmost in the row's first printed line: "13" before "The port of Ptolemais", read apart)
+                found_at[ri, c] = min(cands, key=lambda l: (0, l.box.x0) if abs(l.box.y0 - a.box.y0) <= 0.5 * em
+                                      else (1, abs(l.box.y0 - a.box.y0)))
+    xs = [x0]
+    for c in range(1, n):
+        at = sorted(l.box.x0 for (_, c_), l in found_at.items() if c_ == c)
+        if not at:
+            return None
+        med = at[len(at) // 2]
+        xs.append(min(x for x in at if x >= med - 3 * em))  # (a word of another column read alike: not its start)
+    if any(b - a < em for a, b in zip(xs, xs[1:] + [x1])):
+        return None
+    ends = xs[1:] + [x1]
+    # (of the block's width, a little wider than the printed lines: the last column has the rest)
+    widths = [100 * (b - a) / (width or x1 - x0) for a, b in zip(xs, xs[1:])]
+    widths.append(100 - sum(widths))
+    firsts = {id(l) for l in found_at.values()}
+    tops = {ri: min(l.box.y0 for (ri_, _), l in found_at.items() if ri_ == ri) for ri, _ in found_at}
+    next_top = {ri: min((t for r_, t in tops.items() if r_ > ri), default=1e9) for ri in tops}
+    face = _times(item.italic)
+    # a cell's printed size: its first line's width for its words set at the table's size (its box's height
+    # is its letters': old-style figures "62" are x-height tall)
+    scale = {id(l): l.box.w / (em * face.text_length(plain(l.text), 1.0)) for l in found_at.values()
+             if sum(ch.isalpha() for ch in l.text) >= 5 and face.text_length(plain(l.text), 1.0) > 0}
+    usual = sorted(scale.values())[len(scale) // 2] if scale else 0.0
+    spans, cells = [], {}
+    for (ri, c), l in found_at.items():
+        r = item.rows[ri]
+        lone = c == 0 and not any(t.strip() for t in r[1:])
+        start, end = (x0, x1) if lone and l.box.x1 > ends[0] + em else (xs[c], ends[c])
+        if (start, end) == (x0, x1) and c == 0 and n > 1:
+            spans.append(ri)  # one cell printed across the table
+        left, right = l.box.x0 - start, end - l.box.x1
+        wide = 0.8 if (start, end) == (x0, x1) else 2.0
+        if left > wide * em and right > wide * em and abs(left - right) < 0.35 * max(left, right):
+            h = "center"
+        elif left > 2 * em and right < 1.0 * em:
+            h = "right"
+        else:
+            h = "left"
+        v = "top"
+        if c > 0 and l.box.y0 - anchors[ri].box.y0 > 0.5 * em:
+            span = (nexts[ri] - anchors[ri].box.y0) if nexts[ri] is not None else None
+            # (the rows' pitch about 1.15 em: from its entry's first line to its last)
+            frac = (l.box.y0 - anchors[ri].box.y0) / (span - 1.15 * em) if span and span > 2.3 * em else 1.0
+            v = "bottom" if frac > 0.75 else "middle" if frac > 0.25 else "top"
+        pad = indent = 0.0
+        if h == "left":
+            # its first line's indent, and its other lines' (an entry's lines after the first set in further)
+            # (the line just below it, above the next row's top: "Marcellinus." of the next row stood higher than
+            # that row's "59", p. 744)
+            below = min(l.box.y0 + 1.8 * em, next_top[ri] - 0.3 * em)
+            rest = [o for o in lines if id(o) not in firsts and l.box.y0 + 0.5 * em < o.box.y0 < below
+                    and start - 0.5 * em <= o.box.x0 < end - 2 * em]
+            nxt = min(rest, key=lambda o: (o.box.y0, o.box.x0), default=None)
+            f, g = max(0.0, left), (max(0.0, nxt.box.x0 - start) if nxt is not None else None)
+            pad = g if g is not None else f
+            indent = f - pad
+            if pad < 0.5 * em:
+                pad, indent = 0.0, f  # (its first line where it stands)
+            indent = indent if abs(indent) > 0.4 * em else 0.0
+        smaller = scale[id(l)] / usual if usual and scale.get(id(l), usual) < 0.8 * usual else 1.0  # (a header in smaller type)
+        cells[f"{ri},{c}"] = (h, v, round(pad / em, 2), round(indent / em, 2), round(smaller * 20) / 20)
+    return {"widths": widths, "spans": spans, "cells": cells}
 
 
 def column_parts(item: Item, group: list[Line], lh: float) -> list[tuple[Item, list[Line]]]:
@@ -2414,7 +2545,8 @@ def build_blocks(items: list[Item], lines: list[Line], layout: PageLayout, pictu
             ty0 = min(l.box.y0 for l in real)
             m = measured_em(item, real, ink, px)
             size = m[0] if m else size0
-            b_ = Block(item, tx0 * px, ty0 * px, (tx1 - tx0) * px * 1.02, size, 1.15 * size, "left")
+            b_ = Block(item, tx0 * px, ty0 * px, (tx1 - tx0) * px * 1.02, size, 1.15 * size, "left",
+                       table=table_columns(item, real, size / px, tx0, tx1, (tx1 - tx0) * 1.02))
             blocks.append(b_)
             continue
         if item.kind == "heading" and (len(group) == 1 or n == 1):
@@ -3126,7 +3258,7 @@ def blocks_html(blocks: list[Block], width_pt: float, height_pt: float, lang: st
                          f'height: {100 * b.h / height_pt:.4f}%;">')
         if b.item is not None:
             parts.append(_block(b.item, b.x, b.y, b.w, b.size, b.line_h, b.align, width_pt, height_pt, b.indent, b.nowrap,
-                                b.letter_spacing, invisible=bool(b.picture) or b.hidden))
+                                b.letter_spacing, invisible=bool(b.picture) or b.hidden, table=b.table))
     return f"""<!DOCTYPE html>
 <html lang="{htmlmod.escape(lang)}">
 <head>
@@ -3292,20 +3424,36 @@ def _pos(x: float, y: float, w: float, height_pt: float, width_pt: float) -> str
     return f"left: {100 * x / width_pt:.4f}%; top: {100 * y / height_pt:.4f}%; width: {100 * w / width_pt:.4f}%;"
 
 
-def _table_html(item: Item, italic: bool) -> str:
-    """A table's rows of cells as an HTML table the engine lays out (its columns as wide as their cells)."""
+def _table_html(item: Item, italic: bool, at: dict | None = None) -> str:
+    """A table's rows of cells as an HTML table the engine lays out: its columns as printed (`at`, from
+    table_columns), else as wide as their cells."""
     n = max(len(r) for r in item.rows)
+    at = at or {}
+    cols = ("<colgroup>" + "".join(f'<col style="width: {w:.3f}%;">' for w in at["widths"]) + "</colgroup>") if at.get("widths") else ""
     rows = []
-    for r in item.rows:
+    for ri, r in enumerate(item.rows):
         cells = list(r) + [""] * (n - len(r))
-        rows.append("<tr>" + "".join(f'<td style="vertical-align: top; padding: 0 0.4em 0 0;">{marked_html(c, italic)}</td>'
-                                      for c in cells) + "</tr>")
-    return f'<table style="width: 100%; border-collapse: collapse;">{"".join(rows)}</table>'
+        def td(c: int, text: str, span: int = 1) -> str:
+            h, v, pad, indent, smaller = at.get("cells", {}).get(f"{ri},{c}", ("left", "top", 0.0, 0.0, 1.0))
+            right = 0.4 if c + span < n else 0.0
+            style = f"text-align: {h}; vertical-align: {v}; padding: 0 {right}em 0 {pad}em;"
+            style += f" text-indent: {indent}em;" if indent else ""
+            style += f" font-size: {smaller}em;" if smaller != 1.0 else ""
+            return (f'<td{f" colspan={chr(34)}{span}{chr(34)}" if span > 1 else ""} style="{style}">'
+                    f'{marked_html(text, italic)}</td>')
+
+        if ri in at.get("spans", ()):
+            rows.append(f"<tr>{td(0, cells[0], n)}</tr>")
+            continue
+        tds = [td(c, text) for c, text in enumerate(cells)]
+        rows.append("<tr>" + "".join(tds) + "</tr>")
+    fixed = " table-layout: fixed;" if cols else ""
+    return f'<table style="width: 100%; border-collapse: collapse;{fixed}">{cols}{"".join(rows)}</table>'
 
 
 def _block(item: Item, x: float, y: float, w: float, size: float, line_h: float, align: str,
            width_pt: float, height_pt: float, indent: float = 0.0, nowrap: bool = False,
-           letter_spacing: float = 0.0, invisible: bool = False) -> str:
+           letter_spacing: float = 0.0, invisible: bool = False, table: dict | None = None) -> str:
     style = _pos(x, y, w, height_pt, width_pt) + f" font-size: {size:.2f}pt; line-height: {line_h:.2f}pt; text-align: {align};"
     if item.italic:
         # (the book's italic is a font of its own: not slanted again)
@@ -3321,7 +3469,7 @@ def _block(item: Item, x: float, y: float, w: float, size: float, line_h: float,
     if item.italic and TYPEFACE:
         attrs += ' data-italic="1"'  # (html2pdf's long-s repair reads italic words apart)
     if item.kind == "table" and item.rows:
-        return f'<div class="region" {attrs} style="{style}">{_table_html(item, item.italic)}</div>'
+        return f'<div class="region" {attrs} style="{style}">{_table_html(item, item.italic, table)}</div>'
     return f'<div class="region" {attrs} style="{style}"><p{p_style}>{marked_html(item.text, item.italic)}</p></div>'
 
 

@@ -125,7 +125,8 @@ def _table_feedback(regions: list, lines: list) -> str:
     where = "; ".join(f"lines {ids[0]}..{ids[-1]}" for ids in inside if ids)
     return ("\n\nThis page holds a table (" + where + "). Give each table as ONE item of kind \"table\": its "
             "\"rows\" are the printed rows, each a list of its cells' texts left to right as printed (an empty "
-            "string for an empty cell; a cell's text may run over several printed lines; keep <i> marks), its "
+            "string for an empty cell; a cell's text may run over several printed lines; keep <i> marks; "
+            "\"italic\" true for a table printed in italic, its upright words then marked <i>), its "
             "\"lines\" all the OCR lines of the table, its \"text\" the cells' texts in reading order. Headers of "
             "the table are its first rows. Everything else on the page as before. If there is no table after all, "
             "answer as before without a table item.")
@@ -153,6 +154,8 @@ SCHEMA = {
     },
     "required": ["items"],
 }
+
+KINDS = SCHEMA["properties"]["items"]["items"]["properties"]["kind"]["enum"]
 
 # the schema for a page asked again about its table: a "table" item with its rows of cells
 TABLE_SCHEMA = json.loads(json.dumps(SCHEMA))
@@ -548,7 +551,11 @@ def _add_split_siblings(lines_of: dict[int, list[str]], answered: list[dict], kn
                 if sib in owned:
                     continue
                 read = [k_ for k_ in (_norm_word(w) for w in known[sib].text.split()) if k_]
-                if read and sum(1 for w in read if w in words) >= 0.6 * len(read):
+                # (a piece of only numbers or one or two letters says nothing: the left table's "8", read "3",
+                # went to the right table, which has a "3", and its box took the left one's number column, p. 84)
+                if not any(sum(c.isalpha() for c in w) >= 3 for w in read):
+                    continue
+                if sum(1 for w in read if w in words) >= 0.6 * len(read):
                     ids.insert(ids.index(i) + 1, sib)
                     owned.add(sib)
 
@@ -600,7 +607,14 @@ def _word_list() -> set[str]:
 
 def learnings(source: Path, glossary: int = 150) -> str:
     """Extra instructions from an earlier run (`source`, a reconstruct output directory): the OCR
-    words its model corrected most often, and one of its pages worked through. "" if it has none."""
+    words its model corrected most often, and one of its pages worked through. "" if it has none.
+
+    Learned once, kept in the source's learnings.txt (delete it to learn again): the guide is part of every
+    prompt, and the source run again with its table pages asked again moved two corrections of equal count,
+    so every page of vols. 2 and 3 was asked again."""
+    kept = source / "learnings.txt"
+    if kept.exists():
+        return kept.read_text(encoding="utf-8")
     fixes: Counter = Counter()
     pages = []
     # only misreadings that are no word: "whole -> whose" or "fame -> same" was right on its page,
@@ -626,7 +640,8 @@ def learnings(source: Path, glossary: int = 150) -> str:
                         fixes[(x, y)] += 1
         prompt = (pw / "llm" / "prompt.txt").read_text(encoding="utf-8")
         at = prompt.find("The page's zones and OCR lines")
-        if at >= 0:
+        # (an example only in the schema the pages are asked with: a table page's answer has a "table" item)
+        if at >= 0 and all(i.get("kind") in KINDS for i in answer["items"]):
             kinds = {i.get("kind") for i in answer["items"]} | ({"drop_cap"} if any(i.get("drop_cap") for i in answer["items"]) else set())
             pages.append((len(kinds), -len(prompt), prompt[at:], answer))
     if not fixes and not pages:
@@ -643,7 +658,9 @@ def learnings(source: Path, glossary: int = 150) -> str:
                      "page the same way, from its own lines and images:\n<example_page>\n" + prompt +
                      "\n</example_page>\n<example_answer>\n" + json.dumps(answer, ensure_ascii=False) +
                      "\n</example_answer>")
-    return "\n\n".join(parts)
+    guide = "\n\n".join(parts)
+    kept.write_text(guide, encoding="utf-8")
+    return guide
 
 
 class Structurer:
