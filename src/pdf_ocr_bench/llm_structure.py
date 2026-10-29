@@ -116,7 +116,54 @@ def table_regions(lines: list, layout: PageLayout) -> list:
                 and len(short) >= 0.5 * len(zl) and sum(1 for c in columns(short) if len(c) >= 3) >= 3:
             out.append((Box(min(l.box.x0 for l in zl), min(l.box.y0 for l in zl), max(l.box.x1 for l in zl),
                             max(l.box.y1 for l in zl)), len(rows), 3))
+    if not out:
+        # over the page, whatever zones the layout cut it into: rows of three short pieces and more, five rows
+        # and more, in columns most of them share (the layout made each column of the Gherah's table a note
+        # strip of its own and its heads a footnote band, and every figure was answered as noise, vol. 3 p. 623)
+        pictures = {z.id for z in layout.zones if z.role in ("picture", "dropcap")}
+        cells = sorted((l for l in lines if l.text.strip() and l.zone not in pictures and len(l.text.split()) <= 3
+                        and l.box.w < 0.25 * layout.width), key=lambda l: (l.box.y0 + l.box.y1) / 2)
+        rows_: list[list] = []
+        for l in cells:
+            mid = (l.box.y0 + l.box.y1) / 2
+            if rows_ and abs(mid - sum((m.box.y0 + m.box.y1) / 2 for m in rows_[-1]) / len(rows_[-1])) < 0.6 * lh:
+                rows_[-1].append(l)
+            else:
+                rows_.append([l])
+        run_: list[list] = []
+        for r in [r for r in rows_ if len(r) >= 3] + [None]:
+            if r is not None and (not run_ or r[0].box.y0 - run_[-1][0].box.y0 < 2.5 * lh):
+                run_.append(r)
+                continue
+            ls = [l for row in run_ for l in row]
+            if len(run_) >= 5:
+                cols: list[list[float]] = []
+                for x in sorted(l.box.x0 for l in ls):
+                    if cols and x - cols[-1][-1] < 1.5 * lh:
+                        cols[-1].append(x)
+                    else:
+                        cols.append([x])
+                if sum(1 for c in cols if len(c) >= 0.5 * len(run_)) >= 3:
+                    out.append((Box(min(l.box.x0 for l in ls), min(l.box.y0 for l in ls), max(l.box.x1 for l in ls),
+                                    max(l.box.y1 for l in ls)), len(run_), 3))
+            run_ = [r] if r is not None else []
     return out
+
+
+def noise_regions(answer: dict | None, lines: list, layout: PageLayout) -> list:
+    """Where an answer gave up twenty lines and more as noise outside any picture: a table Vision read in
+    pieces, whole columns of figures as one tall line, that the model could not make out from them (the
+    Gherah's table, its 110 lines all noise, vol. 3 p. 623). [(box, lines, 0)], as table_regions."""
+    from .page_layout import Box
+
+    pictures = {z.id for z in layout.zones if z.role in ("picture", "dropcap")}
+    by_id = {l.id: l for l in lines}
+    ls = [by_id[i] for it in (answer or {}).get("items", []) if it.get("kind") == "noise"
+          for i in it.get("lines") or [] if i in by_id and by_id[i].zone not in pictures]
+    if len(ls) < 20:
+        return []
+    return [(Box(min(l.box.x0 for l in ls), min(l.box.y0 for l in ls), max(l.box.x1 for l in ls),
+                 max(l.box.y1 for l in ls)), len(ls), 0)]
 
 
 def _table_feedback(regions: list, lines: list) -> str:
@@ -783,7 +830,7 @@ class Structurer:
                 and not any(it.kind == "table" for it in items):
             # a table on the page (its rows of cells set as lines one by one ran into each other): asked once
             # more for it as a table; that answer is kept when it holds one
-            regions = table_regions(r["lines"], r["layout"])
+            regions = table_regions(r["lines"], r["layout"]) or noise_regions(answer, r["lines"], r["layout"])
             if regions:
                 (pw / "table_asked").write_text(f"{len(regions)} table regions\n", encoding="utf-8")
                 content, _ = claude_cli.page_content(self.work / r["name"] / "native.png", pw)
