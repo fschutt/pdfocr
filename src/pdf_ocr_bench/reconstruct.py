@@ -1322,12 +1322,14 @@ def catchword_ink(layout: PageLayout, lines: list[Line], prev: list[Line], lh: f
     return box, []
 
 
-def line_art_plate(ink, lines: list[Line], lh: float) -> Box | None:
+def line_art_plate(ink, lines: list[Line], lh: float, pictures: list[Box] = ()) -> Box | None:
     """An engraved plate drawn in lines too thin for the layout to take it for a picture (the plan of
     Noah's ark, vol. 1 p. 222; the ground plots of the Temple, vol. 3 p. 25, 41; coins, p. 609-611): most
     of the page's ink outside the lines the OCR read (its labels, its title, its legend), over most of the
-    page. Its box: the extent of that ink, out to the long rules a line's box took in (a frame's side).
-    None on a page of text (there, 17% at the most, on a table's page: rules and braces)."""
+    page, nor in the pictures the layout found (a headpiece engraving over a page of text made the whole page
+    one picture, its text invisible, vol. 2 p. 2). Its box: the extent of that ink, out to the long rules a
+    line's box took in (a frame's side). None on a page of text (there, 17% at the most, on a table's page:
+    rules and braces)."""
     import numpy as np
 
     if ink is None:
@@ -1338,6 +1340,8 @@ def line_art_plate(ink, lines: list[Line], lh: float) -> Box | None:
     pad = int(0.3 * lh)
     for l in lines:
         read[max(0, l.box.y0 - pad):l.box.y1 + pad, max(0, l.box.x0 - pad):l.box.x1 + pad] = True
+    for b in pictures:
+        read[max(0, b.y0):b.y1, max(0, b.x0):b.x1] = True
     rest = ink & ~read
     if rest.sum() < 0.6 * max(1, ink.sum()):
         return None
@@ -3962,7 +3966,8 @@ def reconstruct(pdf_path: Path, out: Path, pages: list[int], lang: tuple[str, ..
         if layout is not None and not any(z.role == "picture" and z.box.w * z.box.h > 0.3 * layout.width * layout.height
                                           for z in layout.zones):
             # a plate drawn in thin lines: the scan's picture of it, its labels invisible
-            frame = line_art_plate(_ink(work / r["name"] / "native.png"), r["lines"], layout.line_height)
+            frame = line_art_plate(_ink(work / r["name"] / "native.png"), r["lines"], layout.line_height,
+                                   [z.box for z in layout.zones if z.role in ("picture", "dropcap")])
             if frame is not None:
                 from PIL import Image
 
