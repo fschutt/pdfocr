@@ -3266,7 +3266,12 @@ def marked_html(text: str, italic: bool) -> str:
     words are the upright ones; <sup>, <sub> as they are."""
     tags = {"<sup>": "<sup>", "</sup>": "</sup>", "<sub>": "<sub>", "</sub>": "</sub>",
             "<i>": '<span class="up">' if italic else "<i>", "</i>": "</span>" if italic else "</i>"}
-    return "".join(tags.get(part, htmlmod.escape(part)) for part in MARK.split(clean_marks(text)))
+    # (no character XML does not allow: Vision read a table cell as "\uFFFE38020", vol. 3 p. 629; OCR garbage,
+    # never the book's. The engine dropped the whole page for it: azul #11, reported)
+    return "".join(tags.get(part, htmlmod.escape(part)) for part in MARK.split(NOT_XML.sub("", clean_marks(text))))
+
+
+NOT_XML = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff\ud800-\udfff]")
 
 
 def _pos(x: float, y: float, w: float, height_pt: float, width_pt: float) -> str:
