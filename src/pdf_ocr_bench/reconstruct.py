@@ -493,7 +493,9 @@ def column_parts(item: Item, group: list[Line], lh: float) -> list[tuple[Item, l
     """A paragraph that runs on into the next column: one part per column (a new part where its
     lines go back up the page), each with its share of the text (by the OCR's characters), in the
     zone most of its lines stand in."""
-    runs = _by_column(item.text, group, lh)
+    # (not one with a drop capital: its rows beside the capital start a capital's width in, no column of their
+    # own; read "AAMAH" for "RAAMAH" they took the opening, and the rest was set over them, vol. 3 p. 777)
+    runs = _by_column(item.text, group, lh) if not item.drop_cap else None
     if runs is None:
         runs = [[group[0]]]
         for line in group[1:]:
