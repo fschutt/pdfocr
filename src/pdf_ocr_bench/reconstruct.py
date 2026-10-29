@@ -636,8 +636,13 @@ def table_columns(item: Item, group: list[Line], em: float, x0: float, x1: float
             below = min(l.box.y0 + 1.8 * em, next_top[ri] - 0.3 * em)
             rest = [o for o in lines if id(o) not in firsts and l.box.y0 + 0.5 * em < o.box.y0 < below
                     and start - 0.5 * em <= o.box.x0 < end - 2 * em]
-            nxt = min(rest, key=lambda o: (o.box.y0, o.box.x0), default=None)
+            # (the leftmost piece of that row: its right half, read apart a px higher, set the entry's lines 17 em
+            # in, vol. 3 p. 641; and an indent of a few em at most)
+            top_ = min((o.box.y0 for o in rest), default=0.0)
+            nxt = min((o for o in rest if o.box.y0 <= top_ + 0.5 * em), key=lambda o: o.box.x0, default=None)
             f, g = max(0.0, left), (max(0.0, nxt.box.x0 - start) if nxt is not None else None)
+            if g is not None and g - f > 4 * em:
+                g = None
             pad = g if g is not None else f
             indent = f - pad
             if pad < 0.5 * em:
@@ -645,7 +650,13 @@ def table_columns(item: Item, group: list[Line], em: float, x0: float, x1: float
             indent = indent if abs(indent) > 0.4 * em else 0.0
         smaller = scale[id(l)] / usual if usual and scale.get(id(l), usual) < 0.8 * usual else 1.0  # (a header in smaller type)
         cells[f"{ri},{c}"] = (h, v, round(pad / em, 2), round(indent / em, 2), round(smaller * 20) / 20)
-    return {"widths": widths, "spans": spans, "cells": cells}
+    # (a cell no line was found for: its column's usual padding, not none: the years of a chronology whose lines
+    # Vision missed were set on the rule at the table's edge, their first figure under it, vol. 3 p. 641)
+    pads = []
+    for c in range(n):
+        ps = sorted(v[2] for k, v in cells.items() if int(k.split(",")[1]) == c and v[0] == "left")
+        pads.append(ps[len(ps) // 2] if ps else 0.0)
+    return {"widths": widths, "spans": spans, "cells": cells, "pads": pads}
 
 
 def column_parts(item: Item, group: list[Line], lh: float) -> list[tuple[Item, list[Line]]]:
@@ -3503,7 +3514,8 @@ def _table_html(item: Item, italic: bool, at: dict | None = None) -> str:
     for ri, r in enumerate(item.rows):
         cells = list(r) + [""] * (n - len(r))
         def td(c: int, text: str, span: int = 1) -> str:
-            h, v, pad, indent, smaller = at.get("cells", {}).get(f"{ri},{c}", ("left", "top", 0.0, 0.0, 1.0))
+            pads = at.get("pads") or [0.0] * n
+            h, v, pad, indent, smaller = at.get("cells", {}).get(f"{ri},{c}", ("left", "top", pads[c], 0.0, 1.0))
             right = 0.4 if c + span < n else 0.0
             style = f"text-align: {h}; vertical-align: {v}; padding: 0 {right}em 0 {pad}em;"
             style += f" text-indent: {indent}em;" if indent else ""
